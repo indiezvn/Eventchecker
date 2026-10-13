@@ -35,7 +35,10 @@
       "android": {
         "id": "com.indiez.solitaire.word.card.puzzle",
         "label": "SW - com.indiez.solitaire.word.card.puzzle"
-      }
+      },
+      "ios": {
+        "id": "WordSolitaire",
+        "label": "SW - WordSolitaire"
     },
     {
       "code": "KN",
