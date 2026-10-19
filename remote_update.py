@@ -43,6 +43,9 @@ def _runtime_profile():
 
 
 def _user_data_dir():
+    configured = os.getenv("EVENTINSPECTOR_DATA_DIR", "").strip()
+    if configured:
+        return os.path.abspath(os.path.expandvars(os.path.expanduser(configured)))
     if os.name == "nt":
         base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
         return os.path.join(base, APP_NAME)

@@ -29,6 +29,7 @@ Historical `checkpoint-*` tags are kept as history; they are not additional mana
 Preset data is independent from app code and is never part of an app-code rollback. The protected files are:
 
 - `sdk_check_presets.json`
+- `package_log_presets.json`
 - `services_checker/apk_check_presets.json`
 - `services_checker/gradle_check_presets.json`
 - `services_checker/gradle_lib_mapping.json`

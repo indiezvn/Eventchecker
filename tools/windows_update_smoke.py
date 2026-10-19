@@ -49,29 +49,20 @@ class _PayloadHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
-def _release_payload_bytes(relative_path: str) -> bytes:
-    """Read the payload represented by the local manifest.
-
-    In CI the checkout is clean, so this resolves to the committed Git blob.
-    During local development a source fix can intentionally be uncommitted;
-    when that file differs from HEAD, use the working-tree bytes so the local
-    manifest and HTTP fixture test the same payload.  This preserves the
-    committed-blob guard for release builds without making local smoke tests
-    fail on an expected source/manifest update in progress.
-    """
+def _release_payload_bytes(payload_ref: str, relative_path: str) -> bytes:
+    """Read the exact immutable Git blob referenced by the manifest."""
     try:
         result = subprocess.run(
-            ["git", "show", f"HEAD:{relative_path}"],
+            ["git", "show", f"{payload_ref}:{relative_path}"],
             cwd=ROOT,
             check=True,
             capture_output=True,
         )
-        working_path = ROOT / relative_path
-        if working_path.is_file() and working_path.read_bytes() != result.stdout:
-            return working_path.read_bytes()
         return result.stdout
-    except (OSError, subprocess.CalledProcessError):
-        return (ROOT / relative_path).read_bytes()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AssertionError(
+            f"manifest payload blob is unavailable for {relative_path} at {payload_ref}: {exc}"
+        ) from exc
 
 
 def main() -> int:
@@ -96,8 +87,9 @@ def main() -> int:
     expected_build = updater._extract_build_number(manifest.get("version"))
     if expected_build is None:
         raise AssertionError(f"Canonical manifest has no release build: {manifest.get('version')!r}")
+    payload_ref = str(manifest.get("payload_ref") or "").strip()
     payloads = {
-        str(item["path"]): _release_payload_bytes(str(item["path"]))
+        str(item["path"]): _release_payload_bytes(payload_ref, str(item["path"]))
         for item in manifest.get("files") or []
         if item.get("path")
     }

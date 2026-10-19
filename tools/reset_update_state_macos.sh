@@ -75,17 +75,10 @@ cat > "${STATE_FILE_V250}" <<JSON
   "files": [
     "Log_checker.py",
     "remote_update.py",
-    "sdk_check_presets.json",
     "remote_update_config_v250.json",
     "services_checker/app.py",
     "services_checker/axml_fallback.py",
-    "services_checker/bundletool-all-1.18.1.jar",
-    "services_checker/apk_check_presets.json",
-    "services_checker/gradle_check_presets.json",
-    "services_checker/gradle_lib_mapping.json",
-    "services_checker/podfile_check_presets.json",
-    "services_checker/podfile_lib_mapping.json",
-    "services_checker/manifest_check_presets.json"
+    "services_checker/bundletool-all-1.18.1.jar"
   ]
 }
 JSON

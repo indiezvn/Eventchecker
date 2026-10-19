@@ -7,6 +7,7 @@ BACKUP_TAG="${BACKUP_TAG:-backup-latest}"
 # replace them with the versions from the older backup commit.
 PROTECTED_PRESET_PATHS=(
     "sdk_check_presets.json"
+    "package_log_presets.json"
     "services_checker/apk_check_presets.json"
     "services_checker/gradle_check_presets.json"
     "services_checker/gradle_lib_mapping.json"

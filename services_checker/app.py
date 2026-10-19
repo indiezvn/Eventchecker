@@ -1973,7 +1973,7 @@ _remote_preset_refresh_lock = threading.Lock()
 
 
 def _services_checker_preset_cache_dir():
-    """Return a writable per-user cache shared by bundled and portable builds."""
+    """Return a writable per-user cache shared by installed and portable builds."""
     configured = os.getenv("EVENTINSPECTOR_PRESET_CACHE_DIR", "").strip()
     if configured:
         cache_dir = os.path.expandvars(os.path.expanduser(configured))
@@ -2000,7 +2000,7 @@ def _services_checker_preset_cache_dir():
 
 
 def _preset_file_candidates(filename):
-    """Prefer the latest writable Git cache, then the bundled fallback file."""
+    """Prefer the latest writable Git cache, then an offline source fallback."""
     return (
         os.path.join(_services_checker_preset_cache_dir(), filename),
         os.path.join(APP_ROOT, filename),
@@ -2168,7 +2168,7 @@ def _preset_file_metadata():
             continue
         cache_path = os.path.join(cache_dir, filename)
         bundled_path = os.path.join(APP_ROOT, filename)
-        for path, source in ((cache_path, "github-cache"), (bundled_path, "bundled")):
+        for path, source in ((cache_path, "github-cache"), (bundled_path, "offline-source")):
             try:
                 with open(path, "rb") as handle:
                     payload = handle.read()
@@ -2260,7 +2260,7 @@ def _normalize_gradle_lib_mapping(payload):
 
 
 def _load_gradle_lib_mapping():
-    """Load the latest remote mapping, with cache and bundled fallbacks."""
+    """Load the latest remote mapping, with cache and offline fallback."""
     payload_candidates = []
     live_payload = _live_remote_preset_payloads.get(GRADLE_LIB_MAPPING_FILENAME)
     if live_payload is not None:
@@ -2299,7 +2299,7 @@ def _normalize_podfile_lib_mapping(payload):
 
 
 def _load_podfile_lib_mapping():
-    """Load the latest remote Podfile mapping, with cache and bundled fallbacks."""
+    """Load the latest remote Podfile mapping, with cache and offline fallback."""
     payload_candidates = []
     live_payload = _live_remote_preset_payloads.get(PODFILE_LIB_MAPPING_FILENAME)
     if live_payload is not None:

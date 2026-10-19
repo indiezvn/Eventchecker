@@ -43,6 +43,7 @@ function Resolve-BundleFile([string]$Root, [string]$RelativePath) {
 
 $sourceMarker = Get-ReleaseMarker $SourcePath
 $bundleSourcePath = Resolve-BundleFile $BundleRoot $SourcePath
+$bundleUpdaterPath = Resolve-BundleFile $BundleRoot "remote_update.py"
 $bundleMarker = Get-ReleaseMarker $bundleSourcePath
 $expectedPattern = "^v$([regex]::Escape($ExpectedSeries))\(\d+\)$"
 

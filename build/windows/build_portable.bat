@@ -14,7 +14,7 @@ if errorlevel 1 (
 
 REM Create venv
 if not exist ".venv" (
-  py -3 -m venv .venv
+  python -m venv .venv
 )
 
 call .venv\Scripts\activate.bat
@@ -29,7 +29,7 @@ if errorlevel 1 (
 
 REM Install deps
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 REM Clean old build output (in case files are locked)
 if exist "dist\EventInspector" rmdir /s /q "dist\EventInspector"
@@ -37,8 +37,8 @@ if exist "build\EventInspector" rmdir /s /q "build\EventInspector"
 if exist "dist\EventInspector-portable.zip" del /f /q "dist\EventInspector-portable.zip"
 
 REM Build portable EXE folder
-pip install pyinstaller PySide6 qtpy
-pyinstaller --noconfirm --clean --windowed --icon assets\app.ico --name "EventInspector" ^
+python -m pip install pyinstaller PySide6 qtpy
+python -m PyInstaller --noconfirm --clean --windowed --icon assets\app.ico --name "EventInspector" ^
   --collect-submodules "engineio" ^
   --collect-submodules "socketio" ^
   --collect-submodules "webview" ^
@@ -62,19 +62,12 @@ pyinstaller --noconfirm --clean --windowed --icon assets\app.ico --name "EventIn
   --hidden-import "PySide6.QtWebEngineWidgets" ^
   --hidden-import "shiboken6" ^
   --add-data "Log_checker.py;." ^
+  --add-data "remote_update.py;." ^
   --add-data "Default event + Default Params.xlsx;." ^
-  --add-data "sdk_check_presets.json;." ^
-  --add-data "package_log_presets.json;." ^
   --add-data "remote_update_config_v250.json;." ^
   --add-data "services_checker\app.py;services_checker" ^
   --add-data "services_checker\axml_fallback.py;services_checker" ^
   --add-data "services_checker\bundletool-all-1.18.1.jar;services_checker" ^
-  --add-data "services_checker\apk_check_presets.json;services_checker" ^
-  --add-data "services_checker\gradle_check_presets.json;services_checker" ^
-  --add-data "services_checker\gradle_lib_mapping.json;services_checker" ^
-  --add-data "services_checker\podfile_check_presets.json;services_checker" ^
-  --add-data "services_checker\podfile_lib_mapping.json;services_checker" ^
-  --add-data "services_checker\manifest_check_presets.json;services_checker" ^
   --add-data "services_checker\my-key.keystore;services_checker" ^
   desktop_app.py
 

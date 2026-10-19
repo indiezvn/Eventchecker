@@ -46,7 +46,10 @@ ROOT = Path(__file__).resolve().parents[1]
 CURRENT_RELEASE_VERSION = "2026-09-29-1-2.5.0-73"
 CURRENT_RELEASE_BUILD = 73
 ROLLBACK_SOURCE_BUILD = 56
-RELEASE_SOURCE_BUILD = CURRENT_RELEASE_BUILD
+# Build marker of the source being prepared.  It runs ahead of
+# CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
+# regenerates the manifest from the committed source.
+RELEASE_SOURCE_BUILD = 74
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -110,13 +113,40 @@ def _payload_path_candidates(manifest_path: Path, item: dict) -> List[Path]:
     return [ROOT / rel_path, payload_dir / rel_path]
 
 
+def _immutable_manifest_payloads(manifest: dict) -> dict[str, bytes]:
+    """Load the exact Git blobs named by the manifest payload_ref.
+
+    Update-flow tests must model what the client downloads.  Reading the
+    mutable worktree here can mix uncommitted source changes with an older
+    manifest hash and create a false repeated-download failure.
+    """
+    payload_ref = str(manifest.get("payload_ref") or "").strip()
+    _assert(payload_ref, "manifest payload_ref is required for update-flow fixtures")
+    payloads: dict[str, bytes] = {}
+    for item in manifest.get("files") or []:
+        rel_path = str(item.get("path") or "").strip()
+        if not rel_path:
+            continue
+        try:
+            payloads[rel_path] = subprocess.check_output(
+                ["git", "show", f"{payload_ref}:{rel_path}"],
+                cwd=str(ROOT),
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise AssertionError(
+                f"manifest payload blob is unavailable for {rel_path} at {payload_ref}: {exc}"
+            ) from exc
+    return payloads
+
+
 def _valid_payload_urls(manifest_path: Path, rel_path: str, payload_path: Path) -> set[str]:
     repo_rel = payload_path.relative_to(ROOT).as_posix()
-    branch = "main"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload_ref = str(manifest.get("payload_ref") or "").strip()
     return {
-        f"https://github.com/trucbm/Eventchecker/raw/{branch}/{repo_rel}",
-        f"https://raw.githubusercontent.com/trucbm/Eventchecker/{branch}/{repo_rel}",
-        f"https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@{branch}/{repo_rel}",
+        f"https://github.com/trucbm/Eventchecker/raw/{payload_ref}/{repo_rel}",
+        f"https://raw.githubusercontent.com/trucbm/Eventchecker/{payload_ref}/{repo_rel}",
+        f"https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@{payload_ref}/{repo_rel}",
     }
 
 
@@ -131,6 +161,8 @@ def test_manifest_contract() -> None:
     for manifest_path in manifests:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
         _assert("version" in data and str(data["version"]).strip(), f"{manifest_path.name} missing version")
+        payload_ref = str(data.get("payload_ref") or "").strip().lower()
+        _assert(re.fullmatch(r"[0-9a-f]{40}", payload_ref) is not None, f"{manifest_path.name} payload_ref must be an immutable Git SHA")
         files = data.get("files") or []
         _assert(files, f"{manifest_path.name} missing files list")
         log_checker_files = [item for item in files if str(item.get("path", "")).strip() == "Log_checker.py"]
@@ -139,6 +171,9 @@ def test_manifest_contract() -> None:
             _assert(str(item.get("path", "")).strip(), f"{manifest_path.name} contains file entry without path")
             _assert(str(item.get("url", "")).strip(), f"{manifest_path.name} contains file entry without url")
             _assert(str(item.get("sha256", "")).strip(), f"{manifest_path.name} contains file entry without sha256")
+            for url in [item.get("url"), *(item.get("urls") or [])]:
+                _assert(payload_ref in str(url), f"{manifest_path.name} payload URL is not pinned: {url}")
+                _assert("/main/" not in str(url) and "@main/" not in str(url), f"{manifest_path.name} payload URL is mutable: {url}")
 
 
 def test_manifest_payload_integrity() -> None:
@@ -146,6 +181,7 @@ def test_manifest_payload_integrity() -> None:
     _assert(manifests, "No release manifest files found")
     for manifest_path in manifests:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        immutable_payloads = _immutable_manifest_payloads(data)
         for item in data.get("files") or []:
             rel_path = str(item.get("path", "")).strip()
             if not rel_path:
@@ -155,8 +191,10 @@ def test_manifest_payload_integrity() -> None:
             _assert(payload_path is not None, f"{manifest_path.name} payload missing for {rel_path}")
 
             expected_sha = str(item.get("sha256", "")).strip().lower()
-            actual_sha = _sha256_file(payload_path).lower()
-            _assert_equal(actual_sha, expected_sha, f"{manifest_path.name} sha mismatch for {rel_path}")
+            payload_bytes = immutable_payloads.get(rel_path)
+            _assert(payload_bytes is not None, f"{manifest_path.name} Git payload missing for {rel_path}")
+            actual_sha = hashlib.sha256(payload_bytes).hexdigest().lower()
+            _assert_equal(actual_sha, expected_sha, f"{manifest_path.name} sha mismatch for {rel_path} at payload_ref")
 
             valid_urls = _valid_payload_urls(manifest_path, rel_path, payload_path)
             url = str(item.get("url", "")).strip()
@@ -173,7 +211,7 @@ def test_manifest_payload_integrity() -> None:
 
 
 def test_canonical_update_channel_contract() -> None:
-    """Keep every current release check on the single main/v250 channel."""
+    """Keep checks on the single v250 channel with immutable payloads."""
     import remote_update as updater
 
     _assert_equal(updater.CHANNEL_ID, "v250", "current updater channel changed")
@@ -197,11 +235,13 @@ def test_canonical_update_channel_contract() -> None:
 
     manifest_path = ROOT / "Updates_2_5" / "remote_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload_ref = str(manifest.get("payload_ref") or "").strip().lower()
+    _assert(re.fullmatch(r"[0-9a-f]{40}", payload_ref) is not None, "current payload ref must be an immutable Git SHA")
     for item in manifest.get("files") or []:
         urls = [item.get("url"), *(item.get("urls") or [])]
         _assert(
-            all("/main/" in str(url) or "@main/" in str(url) for url in urls if url),
-            f"current release payload must use main: {item.get('path')}",
+            all(payload_ref in str(url) and "/main/" not in str(url) and "@main/" not in str(url) for url in urls if url),
+            f"current release payload must use immutable ref {payload_ref}: {item.get('path')}",
         )
 
 
@@ -252,8 +292,8 @@ def test_package_log_presets_contract() -> None:
         ROOT / "build" / "windows" / "build_windows.bat",
     ):
         _assert(
-            "package_log_presets.json" in build_script.read_text(encoding="utf-8", errors="ignore"),
-            f"{build_script.name} does not bundle package_log_presets.json",
+            "package_log_presets.json" not in build_script.read_text(encoding="utf-8", errors="ignore"),
+            f"{build_script.name} must not bundle package_log_presets.json",
         )
 
 
@@ -1719,13 +1759,6 @@ def test_sdk_check_preset_contract() -> None:
     _assert_equal(bright_compare.get("total_count"), 291, "Bright/SKAds compare row count changed")
     _assert_equal(bright_compare.get("extra_identifiers"), ["extra-network.skadnetwork"], "Bright/SKAds extra identifier warning changed")
     _assert(any(row.get("status") == "MISSING" for row in bright_compare.get("rows", [])), "Bright/SKAds compare must report missing identifiers")
-    merged_remote = lc._merge_local_bright_preset_data({"C-192-iOS": {"platform": "ios", "lines": []}})
-    _assert_equal(
-        merged_remote.get("C-192-iOS", {}).get("bright", {}).get("version"),
-        "1.605.415",
-        "local Bright/SKAds additions must survive an older remote preset response",
-    )
-
     c180_ios_preset = presets["C-180-iOS"]
     _assert_equal(c180_ios_preset.get("platform"), "ios", "C-180 iOS preset platform changed")
     c180_ios_lines = c180_ios_preset.get("lines") or []
@@ -1760,7 +1793,8 @@ def test_sdk_check_preset_contract() -> None:
     _assert(source_text.count('id="reloadBrightSkadPresetsBtn"') == 1, "Bright/SKAds preset reload button must exist exactly once")
     _assert("clean_lines" in source_text and '"lines": clean_lines' in source_text, "empty SDK presets must remain valid")
     _assert('"skadnetwork_identifiers"' in source_text and "_compare_bright_skad_preset" in source_text, "Bright/SKAds preset comparison support is missing")
-    _assert("_merge_local_bright_preset_data" in source_text, "local Bright/SKAds preset fallback is missing")
+    _assert("_merge_local_bright_preset_data" not in source_text, "SDK preset loader must not merge stale local Bright/SKAds data")
+    _assert("return presets, \"github\"" in source_text, "SDK preset loader must return the live Git payload")
     _assert('"Accept-Encoding": "identity"' in source_text, "SDK preset fetch must bypass stale compressed cache")
     _assert("def _fetch_sdk_check_presets(force_remote=False):" in source_text, "SDK preset force refresh support is missing")
     _assert("refresh_requested = request.args.get(\"refresh\"" in source_text, "SDK preset refresh query is missing")
@@ -2255,6 +2289,7 @@ def test_preset_revert_protection_contract() -> None:
     policy = (ROOT / "BACKUP_POLICY.md").read_text(encoding="utf-8", errors="ignore")
     protected_paths = (
         "sdk_check_presets.json",
+        "package_log_presets.json",
         "services_checker/apk_check_presets.json",
         "services_checker/gradle_check_presets.json",
         "services_checker/gradle_lib_mapping.json",
@@ -3525,13 +3560,27 @@ def test_canonical_manifest_build_contract() -> None:
     manifest_path = ROOT / "Updates_2_5" / "remote_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     _assert_equal(manifest.get("version"), CURRENT_RELEASE_VERSION, "canonical manifest must target the current build")
+    payload_ref = str(manifest.get("payload_ref") or "").strip().lower()
+    _assert(re.fullmatch(r"[0-9a-f]{40}", payload_ref) is not None, "canonical manifest payload_ref must be an immutable Git SHA")
     for item in manifest.get("files") or []:
         _assert("compat_sha256" not in item, "canonical manifest must not carry a compatibility payload hash")
         for url in [item.get("url"), *(item.get("urls") or [])]:
             _assert(
-                "/main/" in str(url) or "@main/" in str(url),
-                f"canonical manifest URL must use the main payload: {url}",
+                payload_ref in str(url) and "/main/" not in str(url) and "@main/" not in str(url),
+                f"canonical manifest URL must use immutable payload ref {payload_ref}: {url}",
             )
+    protected_preset_paths = {
+        "sdk_check_presets.json",
+        "package_log_presets.json",
+        "services_checker/apk_check_presets.json",
+        "services_checker/gradle_check_presets.json",
+        "services_checker/gradle_lib_mapping.json",
+        "services_checker/podfile_check_presets.json",
+        "services_checker/podfile_lib_mapping.json",
+        "services_checker/manifest_check_presets.json",
+    }
+    manifest_paths = {str(item.get("path") or "").strip() for item in manifest.get("files") or []}
+    _assert(not (manifest_paths & protected_preset_paths), "release manifest must not ship preset data")
 
 
 def test_update_flow_canonical_v25() -> None:
@@ -3540,11 +3589,7 @@ def test_update_flow_canonical_v25() -> None:
     manifest_path = ROOT / "Updates_2_5" / "remote_manifest.json"
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes)
-    payloads = {
-        str(item["path"]): (ROOT / str(item["path"])).read_bytes()
-        for item in manifest.get("files") or []
-        if item.get("path")
-    }
+    payloads = _immutable_manifest_payloads(manifest)
     original_home = os.environ.get("HOME")
     original_bundle_build = os.environ.get("EVENTINSPECTOR_BUNDLED_BUILD")
     original_bundle_source = os.environ.get("EVENTINSPECTOR_BUNDLED_BUILD_SOURCE")
@@ -3573,27 +3618,28 @@ def test_update_flow_canonical_v25() -> None:
             prepared = updater.get_prepared_update_info()
             _assert_equal(prepared.get("build"), CURRENT_RELEASE_BUILD, "prepared v2.5 payload build mismatch")
             _assert(os.path.exists(os.path.join(prepared["update_dir"], "Log_checker.py")), "prepared Log_checker.py missing")
-            _assert(os.path.exists(os.path.join(prepared["update_dir"], "sdk_check_presets.json")), "prepared SDK preset file missing")
             _assert(
                 os.path.exists(os.path.join(prepared["update_dir"], "services_checker", "bundletool-all-1.18.1.jar")),
                 "prepared bundletool asset missing from the remote update payload",
             )
             _assert(
-                os.path.exists(os.path.join(prepared["update_dir"], "services_checker", "manifest_check_presets.json")),
-                "prepared manifest preset payload missing",
-            )
-            _assert(
-                os.path.exists(os.path.join(prepared["update_dir"], "services_checker", "gradle_lib_mapping.json")),
-                "prepared Gradle mapping payload missing",
-            )
-            _assert(
-                os.path.exists(os.path.join(prepared["update_dir"], "services_checker", "podfile_lib_mapping.json")),
-                "prepared Podfile mapping payload missing",
-            )
-            _assert(
                 os.path.exists(os.path.join(prepared["update_dir"], "services_checker", "axml_fallback.py")),
                 "prepared dependency-free AXML fallback payload missing",
             )
+            for preset_path in (
+                "sdk_check_presets.json",
+                "package_log_presets.json",
+                "services_checker/apk_check_presets.json",
+                "services_checker/gradle_check_presets.json",
+                "services_checker/gradle_lib_mapping.json",
+                "services_checker/podfile_check_presets.json",
+                "services_checker/podfile_lib_mapping.json",
+                "services_checker/manifest_check_presets.json",
+            ):
+                _assert(
+                    not os.path.exists(os.path.join(prepared["update_dir"], *preset_path.split("/"))),
+                    f"preset data must stay outside the prepared app update: {preset_path}",
+                )
 
             selected = desktop._select_prepared_update_candidate(
                 [{
@@ -3610,7 +3656,7 @@ def test_update_flow_canonical_v25() -> None:
             )
             _assert("Default Ad Events" in updated_source, "prepared payload does not contain Default Ad Events")
             _assert(
-                f"v2.5.0({RELEASE_SOURCE_BUILD})" in updated_source,
+                f"v2.5.0({CURRENT_RELEASE_BUILD})" in updated_source,
                 "prepared payload carries the wrong UI build marker",
             )
 
@@ -3641,11 +3687,7 @@ def test_windows_portable_update_staging() -> None:
     manifest_path = ROOT / "Updates_2_5" / "remote_manifest.json"
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes)
-    payloads = {
-        str(item["path"]): (ROOT / str(item["path"])).read_bytes()
-        for item in manifest.get("files") or []
-        if item.get("path")
-    }
+    payloads = _immutable_manifest_payloads(manifest)
     original_os_name = updater.os.name
     original_user_data_dir = updater._user_data_dir
     original_download_first = updater._download_first
@@ -3707,12 +3749,23 @@ def test_windows_portable_update_staging() -> None:
 
 
 def test_build_scripts_clean_outputs() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8", errors="ignore")
+    _assert("*.py text eol=lf" in attributes, "Git checkout must keep Python payloads on LF")
+    _assert("*.json text eol=lf" in attributes, "Git checkout must keep JSON payloads on LF")
+    _assert("*.jar binary" in attributes, "Git checkout must keep bundletool binary")
+    _assert("*.keystore binary" in attributes, "Git checkout must keep keystore binary")
     mac_script = (ROOT / "build" / "macos" / "build_macos.sh").read_text(encoding="utf-8", errors="ignore")
     win_portable_script = (ROOT / "build" / "windows" / "build_portable.bat").read_text(encoding="utf-8", errors="ignore")
     win_installer_script = (ROOT / "build" / "windows" / "build_windows.bat").read_text(encoding="utf-8", errors="ignore")
     _assert("verify_update_manifest.py" in mac_script, "macOS build must verify update manifest hashes")
     _assert("verify_update_manifest.py" in win_portable_script, "Windows portable build must verify update manifest hashes")
     _assert("verify_update_manifest.py" in win_installer_script, "Windows installer build must verify update manifest hashes")
+    _assert("python -m venv .venv" in win_portable_script, "Windows portable build must use the configured Python interpreter")
+    _assert("python -m venv .venv" in win_installer_script, "Windows installer build must use the configured Python interpreter")
+    _assert("python -m PyInstaller" in win_portable_script, "Windows portable build must invoke PyInstaller from the active environment")
+    _assert("python -m PyInstaller" in win_installer_script, "Windows installer build must invoke PyInstaller from the active environment")
+    _assert("python -m pip install -r requirements.txt" in win_portable_script, "Windows portable build must install dependencies into the active environment")
+    _assert("python -m pip install -r requirements.txt" in win_installer_script, "Windows installer build must install dependencies into the active environment")
 
     mac_expected = [
         'rm -rf "dist/EventInspector.app"',
@@ -3728,7 +3781,8 @@ def test_build_scripts_clean_outputs() -> None:
     _assert('--target-arch "$MACOS_TARGET_ARCH"' in mac_script, "macOS build must pass the target architecture")
     _assert('--exclude-module "markupsafe._speedups"' in mac_script, "macOS universal build must avoid the arm64-only MarkupSafe speedup")
     _assert('--add-data "Log_checker.py:."' in mac_script, "macOS build must package the bundled release marker")
-    _assert('--add-data "sdk_check_presets.json:."' in mac_script, "macOS build must package SDK presets")
+    _assert('--add-data "sdk_check_presets.json:."' not in mac_script, "macOS build must keep SDK presets outside the app bundle")
+    _assert('--add-data "package_log_presets.json:."' not in mac_script, "macOS build must keep Package Log presets outside the app bundle")
     _assert('--collect-submodules "androguard.core"' in mac_script, "macOS build must package manifest parser submodules")
     _assert('--collect-data "androguard"' in mac_script, "macOS build must package manifest parser data")
     _assert('--hidden-import "androguard.core.axml"' in mac_script, "macOS build must include AXMLPrinter explicitly")
@@ -3736,19 +3790,17 @@ def test_build_scripts_clean_outputs() -> None:
         "services_checker/app.py",
         "services_checker/axml_fallback.py",
         "services_checker/bundletool-all-1.18.1.jar",
-        "services_checker/apk_check_presets.json",
-        "services_checker/gradle_check_presets.json",
-        "services_checker/gradle_lib_mapping.json",
-        "services_checker/podfile_check_presets.json",
-        "services_checker/podfile_lib_mapping.json",
-        "services_checker/manifest_check_presets.json",
         "services_checker/my-key.keystore",
     ):
         _assert(service_asset in mac_script, f"macOS build must package {service_asset}")
-    _assert('--add-data "sdk_check_presets.json;."' in win_portable_script, "Windows portable build must package SDK presets")
-    _assert('--add-data "sdk_check_presets.json;."' in win_installer_script, "Windows installer build must package SDK presets")
+    _assert('--add-data "sdk_check_presets.json;."' not in win_portable_script, "Windows portable build must keep SDK presets outside the app bundle")
+    _assert('--add-data "sdk_check_presets.json;."' not in win_installer_script, "Windows installer build must keep SDK presets outside the app bundle")
+    _assert('--add-data "package_log_presets.json;."' not in win_portable_script, "Windows portable build must keep Package Log presets outside the app bundle")
+    _assert('--add-data "package_log_presets.json;."' not in win_installer_script, "Windows installer build must keep Package Log presets outside the app bundle")
     _assert('--add-data "Log_checker.py;."' in win_portable_script, "Windows portable build must package the release source")
     _assert('--add-data "Log_checker.py;."' in win_installer_script, "Windows installer build must package the release source")
+    _assert('--add-data "remote_update.py;."' in win_portable_script, "Windows portable build must package the updater source")
+    _assert('--add-data "remote_update.py;."' in win_installer_script, "Windows installer build must package the updater source")
     _assert('verify_release_source.ps1' in win_portable_script, "Windows portable build must validate the release source")
     _assert('verify_release_source.ps1' in win_installer_script, "Windows installer build must validate the release source")
     _assert('verify_bundle.ps1' in win_portable_script, "Windows portable build must validate the built bundle")
@@ -3763,18 +3815,14 @@ def test_build_scripts_clean_outputs() -> None:
         "services_checker\\app.py",
         "services_checker\\axml_fallback.py",
         "services_checker\\bundletool-all-1.18.1.jar",
-        "services_checker\\apk_check_presets.json",
-        "services_checker\\gradle_check_presets.json",
-        "services_checker\\gradle_lib_mapping.json",
-        "services_checker\\podfile_check_presets.json",
-        "services_checker\\podfile_lib_mapping.json",
-        "services_checker\\manifest_check_presets.json",
         "services_checker\\my-key.keystore",
     ):
         _assert(service_asset in win_portable_script, f"Windows portable build must package {service_asset}")
         _assert(service_asset in win_installer_script, f"Windows installer build must package {service_asset}")
     spec_text = (ROOT / "EventInspector.spec").read_text(encoding="utf-8", errors="ignore")
-    _assert("('sdk_check_presets.json', '.')" in spec_text, "PyInstaller spec must package SDK presets")
+    _assert("('sdk_check_presets.json', '.')" not in spec_text, "PyInstaller spec must keep SDK presets outside the app bundle")
+    _assert("('package_log_presets.json', '.')" not in spec_text, "PyInstaller spec must keep Package Log presets outside the app bundle")
+    _assert("('remote_update.py', '.')" in spec_text, "PyInstaller spec must package the updater source")
     _assert("collect_data_files('androguard')" in spec_text, "PyInstaller spec must collect manifest parser data")
     _assert("collect_submodules('androguard.core')" in spec_text, "PyInstaller spec must include manifest parser submodules")
     _assert("'androguard.core.axml'" in spec_text, "PyInstaller spec must include AXMLPrinter explicitly")
@@ -3783,12 +3831,6 @@ def test_build_scripts_clean_outputs() -> None:
         "services_checker/app.py",
         "services_checker/axml_fallback.py",
         "services_checker/bundletool-all-1.18.1.jar",
-        "services_checker/apk_check_presets.json",
-        "services_checker/gradle_check_presets.json",
-        "services_checker/gradle_lib_mapping.json",
-        "services_checker/podfile_check_presets.json",
-        "services_checker/podfile_lib_mapping.json",
-        "services_checker/manifest_check_presets.json",
         "services_checker/my-key.keystore",
     ):
         _assert(service_asset in spec_text, f"PyInstaller spec must package {service_asset}")
@@ -3817,7 +3859,8 @@ def test_windows_release_build_version_contract() -> None:
 
     _assert('default: "main"' in workflow, "Windows workflow must default to the main source ref")
     _assert(
-        "ref: ${{ inputs.source_ref || 'main' }}" in workflow
+        "ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.sha }}" in workflow
+        or "ref: ${{ inputs.source_ref || 'main' }}" in workflow
         or "ref: ${{ inputs.source_ref || github.sha }}" in workflow,
         "Windows workflow must checkout the requested source ref",
     )
@@ -3833,6 +3876,7 @@ def test_windows_release_build_version_contract() -> None:
     _assert('ExpectedSeries = "2.5.0"' in source_guard, "Windows source guard must enforce the v2.5 series")
     _assert("$match.Groups['build'].Value" in source_guard, "Windows source guard must derive the build number from source")
     _assert("bundleMarker -ne $sourceMarker" in bundle_guard, "Windows bundle guard must reject stale bundled source")
+    _assert('Resolve-BundleFile $BundleRoot "remote_update.py"' in bundle_guard, "Windows bundle guard must verify the updater source")
     _assert("EventInspector.exe" in bundle_guard, "Windows bundle guard must require the executable")
     _assert("-PrintVersion" in installer_script, "Windows installer must derive its version from the source")
     _assert("/DMyAppVersion=%EVENTINSPECTOR_RELEASE_VERSION%" in installer_script, "Inno Setup must receive the source version")
@@ -4173,6 +4217,15 @@ TESTS: List[Callable[[], None]] = [
 ]
 
 
+RELEASE_ONLY_TESTS = {
+    # These checks intentionally compare the current worktree with the
+    # immutable release manifest.  They belong to the release gate, not to a
+    # normal local logic run while a new change is still uncommitted.
+    "test_release_payload_sync",
+    "test_windows_update_http_smoke",
+}
+
+
 def run_tests(selected: Iterable[Callable[[], None]]) -> List[HarnessResult]:
     results: List[HarnessResult] = []
     for test in selected:
@@ -4188,6 +4241,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="EventInspector local harness")
     parser.add_argument("--json", action="store_true", help="Emit JSON results")
     parser.add_argument("--only", nargs="*", default=[], help="Run only named tests")
+    parser.add_argument(
+        "--profile",
+        choices=("local", "release"),
+        default="local",
+        help="local skips worktree-vs-release gates; release runs every test (default: local)",
+    )
     args = parser.parse_args()
 
     selected = TESTS
@@ -4198,6 +4257,8 @@ def main() -> int:
         if missing:
             print(f"Unknown test name(s): {', '.join(sorted(missing))}", file=sys.stderr)
             return 2
+    elif args.profile == "local":
+        selected = [test for test in TESTS if test.__name__ not in RELEASE_ONLY_TESTS]
 
     results = run_tests(selected)
     failures = [result for result in results if not result.passed]

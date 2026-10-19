@@ -87,7 +87,7 @@ pip install -r requirements.txt
 Windows PowerShell:
 
 ```powershell
-py -3 -m venv .venv
+python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
@@ -96,7 +96,7 @@ pip install -r requirements.txt
 Windows CMD:
 
 ```bat
-py -3 -m venv .venv
+python -m venv .venv
 .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 pip install -r requirements.txt
@@ -418,7 +418,7 @@ App hien co co che update payload thong qua:
 Khi sua mot tinh nang ma app can nhan qua updater:
 
 1. Sua source chinh can thiet
-2. Dong bo `sha256` va version trong `Updates_2_5/remote_manifest.json`
+2. Dong bo `sha256`, version va `payload_ref` trong `Updates_2_5/remote_manifest.json`; `payload_ref` phai la commit SHA 40 ky tu chua cac payload do
 3. Tang version/badge neu can
 4. Commit va push tren `main` sau khi test
 
@@ -550,7 +550,7 @@ Neu updater khong dung:
 
 - kiem tra `remote_manifest.json`
 - kiem tra `sha256`
-- kiem tra branch `main` da push chua
+- kiem tra `payload_ref` co ton tai tren remote va cac URL payload deu tro vao cung commit SHA
 
 
 ## 17. Khuyen nghi cho team
@@ -575,14 +575,29 @@ Muc tieu cua harness:
 File chay harness:
 
 ```bash
-python3 tools/eventchecker_harness.py
+python3 tools/eventchecker_harness.py --profile local
 ```
+
+`--profile local` la check cho code dang phat trien: manifest duoc doi chieu
+voi blob bat bien cua `payload_ref`, con cac gate doi worktree phai trung
+manifest se khong lam fail local test chi vi dang co thay doi chua commit.
+
+Truoc khi commit/push mot release, dong bo manifest tu dung commit se phat
+hanh roi chay day du release gate:
+
+```bash
+python3 tools/sync_update_manifest.py --payload-ref <commit-sha> --version <release-version>
+python3 tools/eventchecker_harness.py --profile release
+```
+
+Lenh `sync_update_manifest.py` chi cap nhat `Updates_2_5/remote_manifest.json`;
+no tu loai cac preset/mapping khoi payload va khong build, commit hay push.
 
 Harness dang check nhung phan de vo nhat:
 
 - shape cua `remote_manifest.json`
 - `sha256` trong manifest phai khop payload that
-- URL payload trong manifest phai tro dung folder release hien tai
+- URL payload trong manifest phai tro vao cung mot commit SHA bat bien
 - mapping package -> game code
 - state cua installation id khi doi package
 - log contract exact-match cho Crashlytics Android va iOS

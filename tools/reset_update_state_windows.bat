@@ -69,17 +69,10 @@ echo Wrote: %APP_SUPPORT_DIR%\remote_update_config_v250.json
   echo   "files": [
   echo     "Log_checker.py",
   echo     "remote_update.py",
-  echo     "sdk_check_presets.json",
   echo     "remote_update_config_v250.json",
   echo     "services_checker/app.py",
   echo     "services_checker/axml_fallback.py",
-  echo     "services_checker/bundletool-all-1.18.1.jar",
-  echo     "services_checker/apk_check_presets.json",
-  echo     "services_checker/gradle_check_presets.json",
-  echo     "services_checker/gradle_lib_mapping.json",
-  echo     "services_checker/podfile_check_presets.json",
-  echo     "services_checker/podfile_lib_mapping.json",
-  echo     "services_checker/manifest_check_presets.json"
+  echo     "services_checker/bundletool-all-1.18.1.jar"
   echo   ]
   echo }
 ) > "%APP_SUPPORT_DIR%\update_state_v250.json"

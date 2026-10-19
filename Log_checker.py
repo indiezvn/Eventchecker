@@ -198,25 +198,6 @@ def _load_sdk_check_presets():
     return {}
 
 
-def _merge_local_bright_preset_data(remote_presets):
-    """Keep local Bright/SKAds additions until the shared preset file is refreshed."""
-    if not isinstance(remote_presets, dict) or not remote_presets:
-        return remote_presets
-    local_presets = _load_sdk_check_presets()
-    if not local_presets:
-        return remote_presets
-    merged = dict(remote_presets)
-    for name, local_preset in local_presets.items():
-        local_bright = local_preset.get("bright") if isinstance(local_preset, dict) else None
-        remote_preset = merged.get(name)
-        if not isinstance(local_bright, dict) or not isinstance(remote_preset, dict):
-            continue
-        if remote_preset.get("bright"):
-            continue
-        merged[name] = {**remote_preset, "bright": local_bright}
-    return merged
-
-
 def _fetch_sdk_check_presets(force_remote=False):
     if os.getenv("SDK_CHECK_PRESETS_PATH") and not force_remote:
         local_presets = _load_sdk_check_presets()
@@ -240,13 +221,18 @@ def _fetch_sdk_check_presets(force_remote=False):
             response.raise_for_status()
             presets = _sanitize_sdk_check_presets(response.json())
             if presets:
-                return _merge_local_bright_preset_data(presets), "github"
+                # Git is the single source of truth.  Do not merge bundled or
+                # stale local preset data into a live response.
+                return presets, "github"
         except Exception as exc:
             logging.warning("Failed to fetch SDK check presets from %s: %s", base_url, exc)
     return _load_sdk_check_presets(), "local"
 
 
 def _user_data_dir():
+    configured = os.getenv("EVENTINSPECTOR_DATA_DIR", "").strip()
+    if configured:
+        return os.path.abspath(os.path.expandvars(os.path.expanduser(configured)))
     if os.name == "nt":
         base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
         return os.path.join(base, "EventInspector")
@@ -256,7 +242,7 @@ def _user_data_dir():
 
 
 def _package_log_presets_file_candidates():
-    """Return editable and bundled locations for Package Log quick-select data."""
+    """Return explicit development/offline fallback locations for Package Log data."""
     candidates = []
     env_path = os.getenv("PACKAGE_LOG_PRESETS_PATH")
     if env_path:
@@ -266,9 +252,8 @@ def _package_log_presets_file_candidates():
     if update_dir:
         candidates.append(os.path.join(update_dir, PACKAGE_LOG_PRESETS_FILENAME))
 
-    # A user-data override is writable in an installed app and takes priority
-    # over the read-only PyInstaller bundle.  Developers can instead edit the
-    # root-level JSON file directly.
+    # These locations are fallback/override paths only.  Normal app startup
+    # fetches the live catalog from Git before consulting them.
     candidates.append(os.path.join(_user_data_dir(), PACKAGE_LOG_PRESETS_FILENAME))
     candidates.append(os.path.join(SCRIPT_DIR, PACKAGE_LOG_PRESETS_FILENAME))
 
@@ -356,7 +341,7 @@ def _load_package_log_presets():
 
 def _fetch_package_log_presets(force_remote=False):
     local_presets = _load_package_log_presets()
-    if not force_remote and local_presets:
+    if os.getenv("PACKAGE_LOG_PRESETS_PATH") and not force_remote and local_presets:
         return local_presets, "local"
 
     cache_bust = time.time_ns()
@@ -379,7 +364,7 @@ def _fetch_package_log_presets(force_remote=False):
                 return presets, "github"
         except Exception as exc:
             logging.warning("Failed to fetch Package Log presets from %s: %s", base_url, exc)
-    return local_presets, "local"
+    return local_presets, "offline"
 
 def _resolve_default_params_path():
     env_path = os.getenv("DEFAULT_PARAMS_XLSX_PATH")
@@ -4308,7 +4293,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(73)</title>
+    <title>Event Inspector v2.5.0(74)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4390,7 +4375,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(73)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(74)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
