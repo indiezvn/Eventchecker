@@ -4,10 +4,10 @@ set -u
 
 APP_SUPPORT_DIR="${HOME}/Library/Application Support/EventInspector"
 MANIFEST_URL="https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json"
-TARGET_VERSION="2026-09-29-1-2.5.0-73"
+TARGET_VERSION="2026-10-19-1-2.5.0-74"
 
 echo "Event Inspector update reset (macOS)"
-echo "Target release: v2.5.0(73)"
+echo "Target release: v2.5.0(74)"
 echo "Target folder: ${APP_SUPPORT_DIR}"
 echo
 echo "Make sure Event Inspector is fully closed before continuing."
