@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import zipfile
 from dataclasses import dataclass
@@ -49,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 74
+RELEASE_SOURCE_BUILD = 75
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -1369,6 +1370,318 @@ def test_ios_tracking_stream_reassembles_repeated_header_wrap() -> None:
         for name, values in original_dedup_seen.items():
             lc.record_dedup_seen[name].update(values)
             lc.record_dedup_order[name].extend(original_dedup_order[name])
+
+
+class _PackageLogStateGuard:
+    """Snapshot and restore the Package Log globals a protocol test touches."""
+
+    NAMES = (
+        "active_platform", "target_package_name", "active_package_log_session_id",
+        "package_log_seq", "package_log_stream_id", "package_log_last_emitted_seq",
+    )
+
+    def __enter__(self):
+        self.values = {name: getattr(lc, name) for name in self.NAMES}
+        self.rows = list(lc.package_log_cache)
+        self.dedup_seen = {name: set(values) for name, values in lc.record_dedup_seen.items()}
+        self.dedup_order = {name: list(values) for name, values in lc.record_dedup_order.items()}
+        self.emit = lc.socketio.emit
+        self.emitted = []
+        lc.socketio.emit = lambda event, payload=None, **kw: self.emitted.append((event, payload, kw.get("to")))
+        lc.package_log_cache.clear()
+        lc._drain_package_log_db_queue()
+        lc._clear_record_dedup("package")
+        lc.active_platform = "android"
+        lc.active_package_log_session_id = None
+        return self
+
+    def __exit__(self, *exc):
+        lc.socketio.emit = self.emit
+        lc._drain_package_log_db_queue()
+        for name, value in self.values.items():
+            setattr(lc, name, value)
+        lc.package_log_cache.clear()
+        lc.package_log_cache.extend(self.rows)
+        for name in lc.record_dedup_seen:
+            lc.record_dedup_seen[name].clear()
+            lc.record_dedup_order[name].clear()
+        for name, values in self.dedup_seen.items():
+            lc.record_dedup_seen[name].update(values)
+            lc.record_dedup_order[name].extend(self.dedup_order[name])
+        return False
+
+    def events(self, name):
+        return [payload for event, payload, _to in self.emitted if event == name]
+
+
+def _start_package_stream_for_test(package_id="com.harness.package"):
+    with lc.lock:
+        lc.target_package_name = package_id
+        return lc._bump_package_log_stream_locked()
+
+
+def test_package_log_delta_sends_only_new_rows() -> None:
+    """Live rows reach the UI once, in seq order, in chunks, without the raw copy."""
+    with _PackageLogStateGuard() as guard:
+        stream_id = _start_package_stream_for_test()
+        total = lc.PACKAGE_LOG_DELTA_CHUNK_ROWS * 2 + 500
+        for index in range(total):
+            lc._append_package_log_row("harness-device", f"raw line {index}", "10-20 10:00:00.000",
+                                       "10:00:00.000", "I", "Tag", f"message {index}", False, "123", "456")
+        _assert_equal(lc._emit_pending_package_log_rows(), total, "emitter did not send every new row")
+        deltas = guard.events("package_log_delta")
+        _assert_equal(len(deltas), 3, "rows were not split into ordered chunks")
+        seqs = [row["seq"] for payload in deltas for row in payload["rows"]]
+        _assert_equal(len(seqs), total, "a delta row was skipped")
+        _assert_equal(seqs, list(range(seqs[0], seqs[0] + total)), "delta seq order has a gap")
+        _assert(all(payload["stream"] == stream_id for payload in deltas), "delta carries the wrong stream")
+        first_row = deltas[0]["rows"][0]
+        _assert("log" not in first_row, "delta rows must not carry the duplicate raw log")
+        _assert_equal((first_row["pid"], first_row["tid"]), ("123", "456"), "pid/tid missing from the delta row")
+        _assert_equal(lc._emit_pending_package_log_rows(), 0, "an already sent row was emitted again")
+        _assert_equal(len(guard.events("package_log_delta")), 3, "no-op pass emitted a delta")
+
+
+def test_package_log_reset_and_sync_protocol() -> None:
+    """Reconnecting clients replay missed rows; a new stream or an old gap is reported."""
+    with _PackageLogStateGuard() as guard:
+        stream_id = _start_package_stream_for_test()
+        for index in range(30):
+            lc._append_package_log_row("harness-device", f"sync raw {index}", message=f"sync {index}")
+        lc._emit_pending_package_log_rows()
+        first_seq = lc.package_log_cache[0]["seq"]
+
+        def sync(data):
+            guard.emitted.clear()
+            with lc.app.test_request_context("/"):
+                lc.request.sid = "harness-sid"
+                lc.handle_package_log_sync(data)
+            return guard.emitted
+
+        emitted = sync({"stream": stream_id, "since_seq": first_seq + 19})
+        rows = [row for event, payload, to in emitted if event == "package_log_delta" for row in payload["rows"]]
+        _assert_equal([row["seq"] for row in rows], list(range(first_seq + 20, first_seq + 30)), "sync replayed the wrong rows")
+        _assert(all(to == "harness-sid" for _event, _payload, to in emitted), "sync reply must go only to the requesting client")
+        _assert(all(payload["sync"] for event, payload, _to in emitted if event == "package_log_delta"), "sync reply is not marked")
+
+        emitted = sync({"stream": stream_id - 1, "since_seq": first_seq + 25})
+        _assert_equal(emitted[0][0], "package_log_reset", "a client on an old stream must be reset first")
+        rows = [row for event, payload, _to in emitted if event == "package_log_delta" for row in payload["rows"]]
+        _assert_equal(len(rows), 30, "a reset client must receive the whole current stream")
+
+        for _ in range(5):
+            lc.package_log_cache.popleft()
+        emitted = sync({"stream": stream_id, "since_seq": first_seq})
+        delta = next(payload for event, payload, _to in emitted if event == "package_log_delta")
+        _assert(delta["gap"], "rows older than the cache window must be reported as a gap")
+
+        lc._emit_package_log_reset()
+        reset = guard.events("package_log_reset")[-1]
+        _assert_equal(reset["stream"], stream_id + 1, "reset did not start a new stream")
+        lc._append_package_log_row("harness-device", "after reset", message="after reset")
+        _assert_equal(lc.package_log_cache[-1]["stream"], stream_id + 1, "new rows must follow the new stream")
+
+
+def test_package_log_raw_and_db_seq_contract() -> None:
+    """Raw logs are fetched on demand; SQLite rows store the same seq."""
+    with _PackageLogStateGuard():
+        _start_package_stream_for_test()
+        lc.active_package_log_session_id = 987654
+        lc._append_package_log_row("harness-device", "RAW-ONLY-PAYLOAD full record", message="short message")
+        seq = lc.package_log_cache[-1]["seq"]
+        queued = lc.package_log_db_queue.get_nowait()
+        _assert_equal(len(queued), 11, "DB row tuple must match the 11 INSERT columns")
+        _assert_equal(queued[-1], seq, "DB row must carry the live seq")
+        response = lc.app.test_client().get(f"/api/package-log/raw?seq={seq}")
+        _assert_equal(response.status_code, 200, "raw API must find a live row")
+        _assert_equal(response.get_json()["raw_log"], "RAW-ONLY-PAYLOAD full record", "raw API returned the wrong record")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        legacy_db = os.path.join(temp_dir, "legacy.sqlite3")
+        conn = lc.sqlite3.connect(legacy_db)
+        conn.execute(
+            "CREATE TABLE package_log_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, "
+            "created_at REAL NOT NULL, time_display TEXT, device_id TEXT, device_name TEXT, level TEXT, tag TEXT, "
+            "message TEXT, raw_log TEXT, is_error INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute("INSERT INTO package_log_entries (session_id, created_at, message) VALUES (1, 1.0, 'old row')")
+        conn.commit()
+        conn.close()
+        original_path = lc.PACKAGE_LOG_DB_PATH
+        try:
+            lc.PACKAGE_LOG_DB_PATH = legacy_db
+            lc._init_package_log_db()
+            lc._init_package_log_db()
+        finally:
+            lc.PACKAGE_LOG_DB_PATH = original_path
+        conn = lc.sqlite3.connect(legacy_db)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(package_log_entries)")}
+        kept = conn.execute("SELECT message FROM package_log_entries").fetchall()
+        conn.close()
+        _assert("seq" in columns, "existing history DB was not migrated with a seq column")
+        _assert_equal(kept, [("old row",)], "migration must keep existing history rows")
+
+
+def _legacy_free_package_db(path: str) -> None:
+    original_path = lc.PACKAGE_LOG_DB_PATH
+    try:
+        lc.PACKAGE_LOG_DB_PATH = path
+        lc._init_package_log_db()
+    finally:
+        lc.PACKAGE_LOG_DB_PATH = original_path
+
+
+def test_package_log_db_writer_survives_write_errors() -> None:
+    """A failing SQLite write must be retried, not end the writer thread."""
+    original_path = lc.PACKAGE_LOG_DB_PATH
+    original_connect = lc._get_package_db_connection
+    original_dropped = lc.package_log_db_dropped_rows
+    original_error = lc.package_log_db_last_error
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = os.path.join(temp_dir, "writer.sqlite3")
+        _legacy_free_package_db(db_path)
+        failures = {"left": 2, "seen": []}
+
+        def flaky_connect():
+            if failures["left"] > 0:
+                failures["left"] -= 1
+                raise lc.sqlite3.OperationalError("database is locked")
+            return original_connect()
+
+        lc._drain_package_log_db_queue()
+        lc.package_log_db_writer_stop.clear()
+        writer = None
+        try:
+            lc.PACKAGE_LOG_DB_PATH = db_path
+            lc._get_package_db_connection = flaky_connect
+            total = lc.PACKAGE_LOG_DB_BATCH_ROWS * 2 + 37
+            for index in range(total):
+                lc._enqueue_package_log_db_row((1, 1.0, "t", "d", "dn", "I", "Tag", f"m{index}", f"r{index}", 0, index + 1))
+            writer = threading.Thread(target=lc._package_log_db_writer, daemon=True)
+            writer.start()
+            deadline = time.time() + 20
+            stored = 0
+            while time.time() < deadline:
+                if lc.package_log_db_last_error:
+                    failures["seen"].append(lc.package_log_db_last_error)
+                conn = lc.sqlite3.connect(db_path)
+                stored = conn.execute("SELECT COUNT(*) FROM package_log_entries").fetchone()[0]
+                conn.close()
+                if stored >= total:
+                    break
+                time.sleep(0.2)
+            _assert_equal(stored, total, "writer lost rows after transient SQLite errors")
+            _assert(failures["seen"], "writer did not expose the SQLite error to the UI state")
+            _assert_equal(lc.package_log_db_last_error, "", "writer did not clear the error after recovering")
+            conn = lc.sqlite3.connect(db_path)
+            seqs = [row[0] for row in conn.execute("SELECT seq FROM package_log_entries ORDER BY id")]
+            conn.close()
+            _assert_equal(seqs, list(range(1, total + 1)), "writer changed the row order while retrying")
+        finally:
+            lc.package_log_db_writer_stop.set()
+            if writer is not None:
+                writer.join(timeout=5)
+            lc.package_log_db_writer_stop.clear()
+            lc._get_package_db_connection = original_connect
+            lc.PACKAGE_LOG_DB_PATH = original_path
+            lc.package_log_db_dropped_rows = original_dropped
+            lc.package_log_db_last_error = original_error
+            lc._drain_package_log_db_queue()
+
+
+def test_package_log_older_rows_and_db_status() -> None:
+    """Scroll-back pages come from SQLite in seq order; DB problems reach the UI."""
+    original_path = lc.PACKAGE_LOG_DB_PATH
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = os.path.join(temp_dir, "older.sqlite3")
+        _legacy_free_package_db(db_path)
+        conn = lc.sqlite3.connect(db_path)
+        conn.executemany(
+            "INSERT INTO package_log_entries (session_id, created_at, time_display, device_id, device_name, level, tag, "
+            "message, raw_log, is_error, seq) VALUES (?, 1.0, '10:00:00.000', 'dev', 'Dev', 'I', 'Tag', ?, ?, 0, ?)",
+            [(7, f"message {seq}", f"raw {seq}", seq) for seq in range(1, 5001)]
+            + [(8, f"other {seq}", f"raw other {seq}", seq) for seq in range(5001, 5101)],
+        )
+        conn.commit()
+        conn.close()
+        try:
+            lc.PACKAGE_LOG_DB_PATH = db_path
+            client = lc.app.test_client()
+            page = client.get("/api/package-log/older?before_seq=3001&limit=1000&session_id=7").get_json()
+            seqs = [row["seq"] for row in page["rows"]]
+            _assert_equal(seqs, list(range(2001, 3001)), "older page must be the rows just before before_seq, oldest first")
+            _assert(page["has_more"], "older page must report that more rows exist")
+            _assert("raw_log" not in page["rows"][0], "older rows must not carry the raw log")
+            last = client.get("/api/package-log/older?before_seq=501&limit=1000&session_id=7").get_json()
+            _assert_equal([row["seq"] for row in last["rows"]], list(range(1, 501)), "first page of the session is wrong")
+            _assert(not last["has_more"], "the start of the session must end scroll-back")
+            other = client.get("/api/package-log/older?before_seq=5101&limit=10&session_id=7").get_json()
+            _assert(all(row["message"].startswith("message") for row in other["rows"]), "older rows leaked from another session")
+        finally:
+            lc.PACKAGE_LOG_DB_PATH = original_path
+
+    with _PackageLogStateGuard() as guard:
+        original_dropped = lc.package_log_db_dropped_rows
+        original_error = lc.package_log_db_last_error
+        original_reported = lc._package_log_db_status_reported
+        try:
+            lc._package_log_db_status_reported = (lc.package_log_db_dropped_rows, lc.package_log_db_last_error)
+            _assert(not lc._emit_package_log_db_status_if_changed(), "unchanged DB status must not be re-sent")
+            lc.package_log_db_dropped_rows += 3
+            lc.package_log_db_last_error = "OperationalError: database is locked"
+            _assert(lc._emit_package_log_db_status_if_changed(), "DB status change was not sent")
+            status = guard.events("package_log_db_status")[-1]
+            _assert_equal(status["error"], "OperationalError: database is locked", "DB error missing from status")
+            _start_package_stream_for_test()
+            lc.active_package_log_session_id = 4242
+            lc._emit_package_log_reset()
+            _assert_equal(guard.events("package_log_reset")[-1]["session_id"], 4242, "reset must name the live session")
+        finally:
+            lc.package_log_db_dropped_rows = original_dropped
+            lc.package_log_db_last_error = original_error
+            lc._package_log_db_status_reported = original_reported
+
+
+def test_package_log_delta_ui_contract() -> None:
+    html = lc.app.test_client().get("/").get_data(as_text=True)
+    for needle in (
+        "socket.on('package_log_delta'",
+        "socket.on('package_log_reset'",
+        "socket.emit('package_log_sync'",
+        "if (l && l.seq) return 'seq:' + l.seq;",
+    ):
+        _assert(needle in html, f"Package Log delta UI contract missing: {needle}")
+    _assert("socket.on('package_log_cache'" not in html, "the full-snapshot Package Log listener must be gone")
+    for needle in (
+        "const PACKAGE_STORE_MAX_ROWS = 200000;",
+        'class="package-log-spacer"',
+        "function renderPackageViewport(",
+        "function packageRowCellTexts(row)",
+        "for (let i = minIdx; i <= maxIdx; i++) selectedPackageRowKeys.add(getPackageRowKey(packageView[i]));",
+        'id="packageNewRowsBtn"',
+        "#packageLogTableBody tr.package-log-row td {",
+        "socket.on('package_log_db_status'",
+        "function loadOlderPackageRows(",
+        "if (container.scrollTop < packageRowHeight * 30) loadOlderPackageRows();",
+        "function releasePackageHistoryPrefix(",
+        'id="searchPackageSessionBtn"',
+        'id="packageDbWarning"',
+    ):
+        _assert(needle in html, f"virtualized Package Log contract missing: {needle}")
+    for removed in ("maxDomRows", "function getPackageSourceLogs", "packageUiMaxRows"):
+        _assert(removed not in html, f"the fixed-size Package Log DOM window is back: {removed}")
+
+
+def test_main_script_has_unique_top_level_names() -> None:
+    """A duplicate top-level `function`/`let`/`const` aborts the whole UI script.
+
+    The harness does not execute JavaScript, so guard the cheapest fatal
+    mistake directly: one name declared twice at the main script's top level.
+    """
+    html = lc.app.test_client().get("/").get_data(as_text=True)
+    names = re.findall(r"^ {8}(?:async\s+)?(?:function\s*\*?\s*|let\s+|const\s+|var\s+|class\s+)([A-Za-z_$][\w$]*)", html, re.M)
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    _assert(not duplicates, f"main UI script declares these names more than once: {duplicates}")
 
 
 def test_android_package_log_ignores_global_pause() -> None:
@@ -4171,6 +4484,13 @@ TESTS: List[Callable[[], None]] = [
     test_ios_package_frame_buffer_has_memory_guard,
     test_android_tracking_stream_reassembles_wrapped_records,
     test_ios_tracking_stream_reassembles_repeated_header_wrap,
+    test_package_log_delta_sends_only_new_rows,
+    test_package_log_reset_and_sync_protocol,
+    test_package_log_raw_and_db_seq_contract,
+    test_package_log_db_writer_survives_write_errors,
+    test_package_log_older_rows_and_db_status,
+    test_package_log_delta_ui_contract,
+    test_main_script_has_unique_top_level_names,
     test_android_package_log_ignores_global_pause,
     test_ios_package_log_preserves_multiline_records,
     test_ios_package_log_tidevice_nul_framing,

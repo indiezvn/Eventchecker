@@ -1353,10 +1353,29 @@ specific_event_name_filters = []
 specific_event_params_filters = []
 
 # 5. Dữ liệu cho Tab Package Logcat
-package_log_cache = deque(maxlen=30000)
+# The server-side cache is only a replay window for (re)connecting clients.
+# Live rows reach the UI as deltas ordered by `seq`, so its size no longer
+# limits what the UI can show.
+PACKAGE_LOG_SERVER_CACHE_ROWS = 50000
+package_log_cache = deque(maxlen=PACKAGE_LOG_SERVER_CACHE_ROWS)
 PACKAGE_LOG_UI_MAX_ROWS = 8000
 PACKAGE_LOG_UI_MAX_ROWS_IOS = 12000
-PACKAGE_LOG_DB_QUEUE_MAX_ITEMS = 5000
+PACKAGE_LOG_DELTA_INTERVAL_SECONDS = 0.2
+PACKAGE_LOG_DELTA_CHUNK_ROWS = 2000
+# Fields sent to the UI.  The raw record stays on the server (cache + SQLite)
+# and is fetched on demand, so each row is not transmitted twice.
+PACKAGE_LOG_UI_FIELDS = (
+    "seq", "device_id", "device_name", "time", "time_display",
+    "level", "tag", "message", "pid", "tid", "is_error",
+)
+# `seq` increases for every accepted row and never resets while the app runs.
+# `package_log_stream_id` changes whenever capture starts, stops or is
+# cleared, so a client can tell a new stream from a gap in the current one.
+package_log_seq = 0
+package_log_stream_id = 0
+package_log_last_emitted_seq = 0
+PACKAGE_LOG_DB_QUEUE_MAX_ITEMS = 50000
+PACKAGE_LOG_DB_BATCH_ROWS = 500
 MAX_IOS_PACKAGE_LOG_BUFFER_CHARS = 500000
 MAX_PACKAGE_LOG_RECORD_CHARS = 200000
 target_package_name = ""
@@ -1368,6 +1387,10 @@ active_ios_package_log_stream_modes = {}
 active_package_log_session_id = None
 package_log_db_queue = Queue(maxsize=PACKAGE_LOG_DB_QUEUE_MAX_ITEMS)
 package_log_db_dropped_rows = 0
+# Last SQLite write error seen by the writer (empty when healthy).
+package_log_db_last_error = ""
+# Only tests set this; the production writer runs for the life of the app.
+package_log_db_writer_stop = threading.Event()
 
 # 6. Dữ liệu cho Tab Callback & Ads Event
 callback_ad_logs = deque(maxlen=MAX_CALLBACK_AD_LOGS)
@@ -1561,6 +1584,13 @@ def _init_package_log_db():
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_package_log_entries_session ON package_log_entries(session_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_package_log_sessions_started ON package_log_sessions(started_at DESC)")
+        # Live rows carry a `seq`; older databases gain the column in place.
+        # ADD COLUMN only rewrites the schema, so it stays instant on a large
+        # history file.  No index is built here: that would scan the whole
+        # table at startup and block the writer.
+        entry_columns = {row[1] for row in conn.execute("PRAGMA table_info(package_log_entries)")}
+        if "seq" not in entry_columns:
+            conn.execute("ALTER TABLE package_log_entries ADD COLUMN seq INTEGER")
         conn.commit()
     finally:
         conn.close()
@@ -1633,19 +1663,30 @@ def _drain_package_log_db_queue():
 
 
 def _package_log_db_writer():
-    conn = _get_package_db_connection()
+    """Persist queued Package Log rows; never let one SQLite error stop it.
+
+    A failed write (locked database during Clear History, disk full, ...)
+    used to end this thread silently, after which every new row was dropped.
+    Now the batch is kept and retried with a fresh connection, and the error
+    is exposed through ``package_log_db_last_error`` for the UI.
+    """
+    global package_log_db_last_error, package_log_db_dropped_rows
+    conn = None
     batch = []
     last_flush = time.time()
+    retry_delay = 0.5
 
     def flush():
-        nonlocal batch, last_flush
+        nonlocal conn, batch, last_flush
         if not batch:
             return
+        if conn is None:
+            conn = _get_package_db_connection()
         conn.executemany(
             """
             INSERT INTO package_log_entries
-            (session_id, created_at, time_display, device_id, device_name, level, tag, message, raw_log, is_error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (session_id, created_at, time_display, device_id, device_name, level, tag, message, raw_log, is_error, seq)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             batch,
         )
@@ -1653,19 +1694,54 @@ def _package_log_db_writer():
         batch = []
         last_flush = time.time()
 
-    try:
-        while True:
+    while not package_log_db_writer_stop.is_set() or batch:
+        if package_log_db_writer_stop.is_set() and conn is None and package_log_db_last_error:
+            break
+        try:
+            item = package_log_db_queue.get(timeout=0.5)
+            batch.append(item)
+            # Take whatever else is already waiting, up to one batch.
+            while len(batch) < PACKAGE_LOG_DB_BATCH_ROWS:
+                try:
+                    batch.append(package_log_db_queue.get_nowait())
+                except Empty:
+                    break
+        except Empty:
+            pass
+        if not batch or (
+            len(batch) < PACKAGE_LOG_DB_BATCH_ROWS
+            and time.time() - last_flush < 0.5
+            and not package_log_db_writer_stop.is_set()
+        ):
+            continue
+        try:
+            flush()
+            if package_log_db_last_error:
+                package_log_db_last_error = ""
+            retry_delay = 0.5
+        except Exception as exc:
+            package_log_db_last_error = f"{type(exc).__name__}: {exc}"
+            logging.warning("Package Log DB write failed, will retry: %s", package_log_db_last_error)
             try:
-                item = package_log_db_queue.get(timeout=0.5)
-                batch.append(item)
-                if len(batch) >= 100:
-                    flush()
-            except Empty:
-                if batch and time.time() - last_flush >= 0.5:
-                    flush()
-    finally:
-        flush()
-        conn.close()
+                if conn is not None:
+                    conn.rollback()
+                    conn.close()
+            except Exception:
+                pass
+            conn = None
+            # Bound memory while the database stays unavailable: keep the
+            # newest rows and count every row given up.
+            overflow = len(batch) - PACKAGE_LOG_DB_QUEUE_MAX_ITEMS
+            if overflow > 0:
+                del batch[:overflow]
+                package_log_db_dropped_rows += overflow
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 5.0)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # --- REGEX PATTERNS ---
@@ -4293,7 +4369,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(74)</title>
+    <title>Event Inspector v2.5.0(75)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4321,6 +4397,18 @@ HTML_TEMPLATE = """
         }
         .resizer:hover { background: rgba(59, 130, 246, 0.15); }
         #packageLogTableBody tr.selected, #packageHistoryTableBody tr.selected { background-color: #bfdbfe !important; }
+        /* Live Package Log: virtualized, one line per row (double-click shows the full record). */
+        #packageLogTableLive { table-layout: fixed; width: 100%; }
+        #packageLogTableLive th.col-time { width: 110px; }
+        #packageLogTableLive th.col-tag { width: 160px; }
+        #packageLogTableBody tr.package-log-row { height: 22px; }
+        #packageLogTableBody tr.package-log-row td {
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            padding-top: 0; padding-bottom: 0; height: 22px; line-height: 22px;
+            border-bottom: 1px solid #f3f4f6; box-sizing: border-box;
+        }
+        #packageLogTableBody tr.package-log-spacer td { padding: 0; border: 0; }
+        #packageNewRowsBtn { position: absolute; right: 24px; bottom: 16px; z-index: 20; }
         .resizer.disabled { cursor: not-allowed; background: transparent; }
         .details-cell pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
         .adrevenue-panel { border: 1px solid #e5e7eb; background: #f9fafb; border-radius: 0.5rem; padding: 0.5rem; }
@@ -4375,7 +4463,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(74)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(75)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5066,6 +5154,7 @@ HTML_TEMPLATE = """
                         <div class="flex items-center gap-3 mt-4">
                             <button id="pausePackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-amber-500 hover:bg-amber-600 text-white">Pause</button>
                             <button id="stopPackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-red-500 hover:bg-red-600 text-white">Stop</button>
+                            <button id="searchPackageSessionBtn" type="button" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-slate-600 hover:bg-slate-700 text-white" title="Search every row of this session in saved history (Message 1, Message 2 and Tag filters)">Tìm toàn session</button>
                         </div>
                     </div>
                     <div class="min-w-0">
@@ -5122,8 +5211,12 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
             </div>
-            <div id="packageLogContainer" class="overflow-auto overflow-x-auto flex-1 border rounded-md" style="min-height: 0;">
-                <table class="min-w-full bg-white">
+            <div id="packageDbWarning" class="hidden mb-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700"></div>
+            <div class="relative flex-1 flex flex-col" style="min-height: 0;">
+            <div id="packageOlderStatus" class="hidden absolute left-4 top-9 z-20 rounded bg-slate-700 px-2 py-1 text-[11px] text-white shadow"></div>
+            <button id="packageNewRowsBtn" type="button" class="hidden bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold py-1.5 px-3 rounded-full shadow">New rows</button>
+            <div id="packageLogContainer" class="overflow-auto flex-1 border rounded-md" style="min-height: 0;">
+                <table id="packageLogTableLive" class="min-w-full bg-white">
                    <thead class="bg-gray-50 sticky top-0 z-10">
                         <tr>
                             <th class="text-left text-xs font-semibold text-gray-600 py-1.5 px-2 border-b time-header resizable col-time">Time<div class="resizer" data-col="time"></div></th>
@@ -5131,8 +5224,9 @@ HTML_TEMPLATE = """
                             <th class="text-left text-xs font-semibold text-gray-600 py-1.5 pl-1 pr-3 border-b resizable col-message">Message<div class="resizer" data-col="message"></div></th>
                         </tr>
                     </thead>
-                    <tbody id="packageLogTableBody" class="divide-y divide-gray-200"></tbody>
+                    <tbody id="packageLogTableBody"></tbody>
                 </table>
+            </div>
             </div>
         </div>
     </div>
@@ -6564,6 +6658,8 @@ HTML_TEMPLATE = """
         let pausedPackageSnapshot = [];
 
         function getPackageRowKey(l) {
+            // Live rows are unique by seq; history rows keep the record key.
+            if (l && l.seq) return 'seq:' + l.seq;
             return logRecordKey(l);
         }
 
@@ -6618,75 +6714,370 @@ HTML_TEMPLATE = """
             return `<tr class="package-log-row hover:bg-gray-50 ${rowClass} ${selectedClass}" data-row-key="${encodeURIComponent(rowKey)}" data-row-index="${idx}"><td class="py-1.5 px-2 font-mono text-[11px] leading-4 time-cell col-time">${escapeHTML(l.time_display || l.time || '')}</td><td class="py-1.5 pr-1 pl-2 font-mono text-[11px] leading-4 tag-cell col-tag" title="${escapeHTML(l.tag || '')}">${escapeHTML(l.tag || '')}</td><td class="py-1.5 pl-1 pr-3 font-mono text-[11px] leading-4 log-cell message-cell col-message ${msgClass}">${escapeHTML(msgText)}</td></tr>`;
         }
 
-        function getPackageSourceLogs(state) {
-            return packageUiPaused ? pausedPackageSnapshot : lastPackageLogs;
+        // --- Live Package Log view (virtualized) ---
+        // lastPackageLogs is the client store, oldest first, holding up to
+        // PACKAGE_STORE_MAX_ROWS rows.  packageView holds the rows that pass
+        // the current filters.  Only the rows inside the viewport (plus a
+        // small overscan) exist in the DOM; spacer rows keep the scrollbar
+        // the size of the whole view.
+        const PACKAGE_STORE_MAX_ROWS = 200000;
+        const PACKAGE_STORE_TRIM_SLACK = 20000;
+        const PACKAGE_VIEW_OVERSCAN = 40;
+        let packageView = [];
+        let packageViewSignature = '';
+        let packageRowHeight = 22;
+        let packageStickToBottom = true;
+        let packageNewRowsWhileAway = 0;
+        let packagePausedAtSeq = 0;
+        let packagePausedNewRows = 0;
+        let packageViewportFirst = -1;
+        let packageViewportLast = -1;
+        let packageViewportDirty = true;
+        let packageViewportFramePending = false;
+        // Rows older than the live store, loaded from SQLite while the user
+        // scrolls up.  While they are shown the store is not trimmed, so the
+        // view never gets a hole between history and live rows.
+        const PACKAGE_STORE_HARD_MAX_ROWS = 400000;
+        const PACKAGE_OLDER_PAGE_ROWS = 2000;
+        let packageHistoryPrefix = [];
+        let packageOlderLoading = false;
+        let packageOlderExhausted = false;
+        let packageSessionId = null;
+
+        function rebuildPackageView(state, signature) {
+            const live = packageUiPaused
+                ? lastPackageLogs.filter(row => row.seq <= packagePausedAtSeq)
+                : lastPackageLogs;
+            const source = packageHistoryPrefix.length ? packageHistoryPrefix.concat(live) : live;
+            packageView = filterPackageLogs(source, state);
+            packageViewSignature = signature;
+            packageViewportDirty = true;
+        }
+
+        function appendToPackageStore(rows) {
+            for (const row of rows) lastPackageLogs.push(row);
+            let keptFromSeq = 0;
+            let prefixDropped = false;
+            if (packageHistoryPrefix.length && lastPackageLogs.length > PACKAGE_STORE_HARD_MAX_ROWS) {
+                // Memory guard while browsing history for a long time.
+                packageHistoryPrefix = [];
+                packageOlderExhausted = false;
+                prefixDropped = true;
+            }
+            if (!packageHistoryPrefix.length && lastPackageLogs.length > PACKAGE_STORE_MAX_ROWS + PACKAGE_STORE_TRIM_SLACK) {
+                lastPackageLogs.splice(0, lastPackageLogs.length - PACKAGE_STORE_MAX_ROWS);
+                keptFromSeq = lastPackageLogs[0].seq;
+            }
+            if (packageUiPaused) {
+                packagePausedNewRows += rows.length;
+                updatePackagePauseLabel();
+                return;
+            }
+            const state = getPackageFilterState();
+            const signature = JSON.stringify(state);
+            if (prefixDropped || signature !== packageViewSignature) {
+                rebuildPackageView(state, signature);
+                return;
+            }
+            const matched = filterPackageLogs(rows, state);
+            for (const row of matched) packageView.push(row);
+            if (keptFromSeq) {
+                let dropped = 0;
+                while (dropped < packageView.length && packageView[dropped].seq < keptFromSeq) dropped++;
+                if (dropped) {
+                    packageView.splice(0, dropped);
+                    if (!packageStickToBottom) {
+                        // Keep the rows the user is reading in place.
+                        const container = document.getElementById('packageLogContainer');
+                        if (container) container.scrollTop = Math.max(0, container.scrollTop - dropped * packageRowHeight);
+                    }
+                }
+            }
+            if (matched.length) {
+                packageViewportDirty = true;
+                if (!packageStickToBottom) {
+                    packageNewRowsWhileAway += matched.length;
+                    updatePackageNewRowsButton();
+                }
+            }
+        }
+
+        function packageAutoScrollEnabled() {
+            const autoScroll = document.getElementById('autoScroll');
+            return !autoScroll || autoScroll.checked;
+        }
+
+        function updatePackageNewRowsButton() {
+            const btn = document.getElementById('packageNewRowsBtn');
+            if (!btn) return;
+            const show = !packageStickToBottom && packageNewRowsWhileAway > 0;
+            btn.classList.toggle('hidden', !show);
+            if (show) btn.textContent = `${packageNewRowsWhileAway.toLocaleString()} dòng mới ↓`;
+        }
+
+        function renderPackageViewport(force = false) {
+            const tbody = document.getElementById('packageLogTableBody');
+            const container = document.getElementById('packageLogContainer');
+            if (!tbody || !container) return;
+            const head = container.querySelector('thead');
+            const headHeight = head ? head.offsetHeight : 0;
+            const viewHeight = container.clientHeight || 600;
+            const rowHeight = packageRowHeight;
+            const total = packageView.length;
+            const pinned = packageStickToBottom && packageAutoScrollEnabled() && !packageUiPaused;
+            const scrollTop = pinned
+                ? Math.max(0, headHeight + total * rowHeight - viewHeight)
+                : container.scrollTop;
+            const bodyTop = Math.max(0, scrollTop - headHeight);
+            const first = Math.max(0, Math.min(total, Math.floor(bodyTop / rowHeight) - PACKAGE_VIEW_OVERSCAN));
+            const last = Math.min(total, Math.ceil((bodyTop + viewHeight) / rowHeight) + PACKAGE_VIEW_OVERSCAN);
+            if (!force && !packageViewportDirty && first === packageViewportFirst && last === packageViewportLast) return;
+            const html = [];
+            if (first > 0) html.push(`<tr class="package-log-spacer"><td colspan="3" style="height:${first * rowHeight}px"></td></tr>`);
+            for (let i = first; i < last; i++) html.push(packageRowHtml(packageView[i], i));
+            const bottom = (total - last) * rowHeight;
+            if (bottom > 0) html.push(`<tr class="package-log-spacer"><td colspan="3" style="height:${bottom}px"></td></tr>`);
+            tbody.innerHTML = html.join('');
+            packageViewportFirst = first;
+            packageViewportLast = last;
+            packageViewportDirty = false;
+            if (pinned) container.scrollTop = container.scrollHeight;
+            const sample = tbody.querySelector('tr.package-log-row');
+            const measured = sample ? sample.getBoundingClientRect().height : 0;
+            if (measured > 0 && Math.abs(measured - packageRowHeight) > 0.5) {
+                // Spacer math must use the real row height or the scrollbar drifts.
+                packageRowHeight = measured;
+                packageViewportDirty = true;
+                schedulePackageViewportRender();
+            }
+        }
+
+        function schedulePackageViewportRender() {
+            if (packageViewportFramePending) return;
+            packageViewportFramePending = true;
+            setTimeout(() => {
+                packageViewportFramePending = false;
+                renderPackageViewport();
+            }, 16);
+        }
+
+        function setPackageOlderStatus(text) {
+            const el = document.getElementById('packageOlderStatus');
+            if (!el) return;
+            el.textContent = text || '';
+            el.classList.toggle('hidden', !text);
+        }
+
+        function releasePackageHistoryPrefix() {
+            // Back at the newest rows: drop history rows so the store can be
+            // trimmed again.
+            if (!packageHistoryPrefix.length) return;
+            packageHistoryPrefix = [];
+            packageOlderExhausted = false;
+            packageSelectionAnchor = null;
+            setPackageOlderStatus('');
+            renderPackageLogTable(true);
+        }
+
+        function loadOlderPackageRows() {
+            if (packageOlderLoading || packageOlderExhausted) return;
+            const oldest = packageHistoryPrefix[0] || lastPackageLogs[0];
+            if (!oldest || !oldest.seq || oldest.seq <= 1) return;
+            const requestStream = packageStreamId;
+            const beforeSeq = oldest.seq;
+            const params = new URLSearchParams({ before_seq: String(beforeSeq), limit: String(PACKAGE_OLDER_PAGE_ROWS) });
+            if (packageSessionId) params.set('session_id', String(packageSessionId));
+            packageOlderLoading = true;
+            setPackageOlderStatus('Đang tải dòng cũ từ lịch sử…');
+            fetch(`/api/package-log/older?${params.toString()}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (requestStream !== packageStreamId) return;
+                    if (!data.ok) throw new Error(data.error || 'failed_to_load_older_rows');
+                    const rows = (data.rows || []).filter(row => row.seq < beforeSeq);
+                    if (!data.has_more) packageOlderExhausted = true;
+                    if (!rows.length) {
+                        setPackageOlderStatus(packageOlderExhausted ? 'Đã tới đầu session' : '');
+                        return;
+                    }
+                    packageHistoryPrefix = rows.concat(packageHistoryPrefix);
+                    const state = getPackageFilterState();
+                    const signature = JSON.stringify(state);
+                    const matched = filterPackageLogs(rows, state);
+                    if (signature === packageViewSignature) {
+                        packageView = matched.concat(packageView);
+                        if (packageSelectionAnchor !== null) packageSelectionAnchor += matched.length;
+                        const container = document.getElementById('packageLogContainer');
+                        // Keep the row under the cursor in place.
+                        if (container) container.scrollTop += matched.length * packageRowHeight;
+                        packageViewportDirty = true;
+                        renderPackageViewport(true);
+                    } else {
+                        renderPackageLogTable(true);
+                    }
+                    setPackageOlderStatus(`+${packageHistoryPrefix.length.toLocaleString()} dòng cũ từ lịch sử` + (packageOlderExhausted ? ' (đầu session)' : ''));
+                })
+                .catch(err => setPackageOlderStatus(`Không tải được dòng cũ: ${err}`))
+                .finally(() => { packageOlderLoading = false; });
         }
 
         function renderPackageLogTable(forceFull = false) {
-            const tbody = document.getElementById('packageLogTableBody');
-            if (!tbody) return;
             const state = getPackageFilterState();
-            const sourceLogs = getPackageSourceLogs(state);
             const signature = JSON.stringify(state);
-            const sameFilter = !packageUiPaused && !forceFull && signature === lastPackageFilterSignature;
-            let appendedOnly = false;
-            let snapshotNeedsRebuild = false;
-
-            if (sameFilter && sourceLogs.length > 0 && lastPackageLastRowKey) {
-                const lastIdx = sourceLogs.findIndex(l => getPackageRowKey(l) === lastPackageLastRowKey);
-                if (lastIdx >= 0 && lastIdx < sourceLogs.length - 1) {
-                    const appendedLogs = filterPackageLogs(sourceLogs.slice(lastIdx + 1), state);
-                    if (appendedLogs.length > 0) {
-                        const startIdx = tbody.querySelectorAll('tr.package-log-row').length;
-                        tbody.insertAdjacentHTML('beforeend', appendedLogs.map((l, idx) => packageRowHtml(l, startIdx + idx)).join(''));
-                    }
-                    appendedOnly = true;
-                } else if (lastIdx < 0 && tbody.querySelector('tr.package-log-row')) {
-                    // The incoming snapshot is authoritative. Appending a
-                    // recent chunk here duplicated the same iOS rows whenever
-                    // the rolling window moved or a multiline record completed.
-                    snapshotNeedsRebuild = true;
-                }
-            }
-
-            const canAppendOnly =
-                !appendedOnly &&
-                !snapshotNeedsRebuild &&
-                sameFilter &&
-                sourceLogs.length >= lastPackageRenderedCount &&
-                (lastPackageRenderedCount === 0 ||
-                    (sourceLogs[0] && getPackageRowKey(sourceLogs[0]) === lastPackageFirstRowKey));
-
-            if (canAppendOnly && sourceLogs.length > lastPackageRenderedCount) {
-                const appendedLogs = filterPackageLogs(sourceLogs.slice(lastPackageRenderedCount), state);
-                if (appendedLogs.length > 0) {
-                    const startIdx = tbody.querySelectorAll('tr.package-log-row').length;
-                    tbody.insertAdjacentHTML('beforeend', appendedLogs.map((l, idx) => packageRowHtml(l, startIdx + idx)).join(''));
-                }
-                appendedOnly = true;
-            }
-
-            if (!appendedOnly) {
-                const filtered = filterPackageLogs(sourceLogs, state);
-                tbody.innerHTML = filtered.map((l, idx) => packageRowHtml(l, idx)).join('');
-            }
-
-            const maxDomRows = activePlatform === 'ios' ? 12000 : 8000;
-            const rows = tbody.querySelectorAll('tr.package-log-row');
-            if (rows.length > maxDomRows) {
-                for (let i = 0; i < rows.length - maxDomRows; i++) rows[i].remove();
-            }
-
-            lastPackageFilterSignature = signature;
-            lastPackageRenderedCount = sourceLogs.length;
-            lastPackageFirstRowKey = sourceLogs[0] ? getPackageRowKey(sourceLogs[0]) : '';
-            lastPackageLastRowKey = sourceLogs.length ? getPackageRowKey(sourceLogs[sourceLogs.length - 1]) : '';
-            if(document.getElementById('autoScroll').checked) document.getElementById('packageLogContainer').scrollTop = document.getElementById('packageLogContainer').scrollHeight;
+            if (forceFull || signature !== packageViewSignature) rebuildPackageView(state, signature);
+            renderPackageViewport(forceFull);
         }
 
-        socket.on('package_log_cache', (logs) => {
-            lastPackageLogs = dedupeLogRecords(logs);
-            if (!packageUiPaused) renderPackageLogTable();
+        document.getElementById('packageLogContainer')?.addEventListener('scroll', () => {
+            const container = document.getElementById('packageLogContainer');
+            const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - packageRowHeight * 2;
+            packageStickToBottom = atBottom;
+            if (atBottom) packageNewRowsWhileAway = 0;
+            updatePackageNewRowsButton();
+            if (atBottom && packageAutoScrollEnabled()) releasePackageHistoryPrefix();
+            if (container.scrollTop < packageRowHeight * 30) loadOlderPackageRows();
+            schedulePackageViewportRender();
+        }, { passive: true });
+
+        document.getElementById('packageNewRowsBtn')?.addEventListener('click', () => {
+            packageStickToBottom = true;
+            packageNewRowsWhileAway = 0;
+            updatePackageNewRowsButton();
+            if (packageHistoryPrefix.length) releasePackageHistoryPrefix();
+            renderPackageViewport(true);
+        });
+
+        document.getElementById('autoScroll')?.addEventListener('change', (e) => {
+            if (e.target.checked) {
+                packageStickToBottom = true;
+                packageNewRowsWhileAway = 0;
+                updatePackageNewRowsButton();
+                releasePackageHistoryPrefix();
+            }
+            renderPackageViewport(true);
+        });
+
+        window.addEventListener('resize', () => schedulePackageViewportRender());
+
+        socket.on('package_log_db_status', (status) => {
+            const banner = document.getElementById('packageDbWarning');
+            if (!banner) return;
+            const dropped = Number(status?.dropped_rows || 0);
+            const error = String(status?.error || '');
+            const parts = [];
+            if (error) parts.push(`Không ghi được lịch sử Package Log (đang thử lại): ${error}`);
+            if (dropped > 0) parts.push(`${dropped.toLocaleString()} dòng không lưu được vào lịch sử (vẫn còn trên màn hình nếu chưa bị cắt).`);
+            banner.textContent = parts.join(' ');
+            banner.classList.toggle('hidden', parts.length === 0);
+        });
+
+        function searchWholePackageSession() {
+            // Live filters cover the in-memory rows; this runs the same
+            // Message 1 / Message 2 / Tag filters on every saved row of the
+            // session through the History view.
+            const message1 = document.getElementById('packageFilterInput')?.value || '';
+            const message2 = document.getElementById('packageFilterInput2')?.value || '';
+            const tag = document.getElementById('packageTagFilterInput')?.value || '';
+            const modal = document.getElementById('packageHistoryModal');
+            if (!modal) return;
+            modal.style.zIndex = '60';
+            modal.classList.remove('hidden');
+            fetch('/api/package-log/sessions')
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.ok) throw new Error(data.error || 'failed_to_load_sessions');
+                    renderPackageHistorySessions(data);
+                    const select = document.getElementById('packageHistorySessionSelect');
+                    if (select && packageSessionId && Array.from(select.options).some(o => o.value === String(packageSessionId))) {
+                        select.value = String(packageSessionId);
+                    }
+                    document.getElementById('packageHistoryFilterInput').value = message1;
+                    document.getElementById('packageHistoryFilterInput2').value = message2;
+                    document.getElementById('packageHistoryFilterInput3').value = tag;
+                    loadSelectedPackageHistory(false);
+                })
+                .catch(err => {
+                    document.getElementById('packageHistoryMeta').textContent = `Failed to load sessions: ${err}`;
+                });
+        }
+        document.getElementById('searchPackageSessionBtn')?.addEventListener('click', searchWholePackageSession);
+
+
+        // Live Package Log rows arrive as ordered deltas.  Each row has a
+        // server-assigned `seq`; `packageStreamId` changes on Start/Stop/Clear.
+        let packageStreamId = null;
+        let lastPackageSeq = 0;
+        let packageSyncPending = false;
+        let packageLiveRenderPending = false;
+        function requestPackageLogSync() {
+            packageSyncPending = true;
+            socket.emit('package_log_sync', {
+                stream: packageStreamId,
+                since_seq: lastPackageSeq,
+                // The server replay window; the client store keeps up to
+                // PACKAGE_STORE_MAX_ROWS rows as live deltas arrive.
+                limit: 50000,
+            });
+        }
+        function resetPackageLogStore(streamId, sessionId) {
+            packageStreamId = (streamId === undefined) ? null : streamId;
+            if (sessionId !== undefined) packageSessionId = sessionId || null;
+            packageHistoryPrefix = [];
+            packageOlderExhausted = false;
+            packageOlderLoading = false;
+            setPackageOlderStatus('');
+            lastPackageSeq = 0;
+            lastPackageLogs = [];
+            packageView = [];
+            packageViewSignature = '';
+            packageViewportDirty = true;
+            packageStickToBottom = true;
+            packageNewRowsWhileAway = 0;
+            packagePausedNewRows = 0;
+            selectedPackageRowKeys.clear();
+            updatePackageNewRowsButton();
+            updatePackagePauseLabel();
+        }
+        function scheduleLivePackageRender() {
+            // Coalesce bursts of deltas into one render.  A timer (not
+            // requestAnimationFrame) keeps rendering while the window is
+            // hidden or minimized, as the previous snapshot renderer did.
+            if (packageLiveRenderPending) return;
+            packageLiveRenderPending = true;
+            setTimeout(() => {
+                packageLiveRenderPending = false;
+                if (!packageUiPaused) renderPackageLogTable();
+            }, 50);
+        }
+        socket.on('connect', () => requestPackageLogSync());
+        socket.on('package_log_reset', (payload) => {
+            resetPackageLogStore(payload ? payload.stream : null, payload ? payload.session_id : null);
+            renderPackageLogTable(true);
+        });
+        socket.on('package_log_delta', (payload) => {
+            if (!payload || !Array.isArray(payload.rows)) return;
+            if (payload.sync) {
+                packageSyncPending = false;
+            } else if (packageSyncPending) {
+                // The socket is ordered: the pending sync reply already covers
+                // every row emitted before it.
+                return;
+            }
+            if (packageStreamId === null) packageStreamId = payload.stream;
+            if (payload.stream !== packageStreamId) {
+                requestPackageLogSync();
+                return;
+            }
+            const fresh = payload.rows.filter(row => row.seq > lastPackageSeq);
+            if (!fresh.length) return;
+            if (!payload.sync && lastPackageSeq > 0 && fresh[0].seq > lastPackageSeq + 1) {
+                // A delta was missed (for example during a reconnect).
+                requestPackageLogSync();
+                return;
+            }
+            lastPackageSeq = fresh[fresh.length - 1].seq;
+            appendToPackageStore(fresh);
+            scheduleLivePackageRender();
         });
 
         function renderPackageHistorySessions(payload) {
@@ -6934,20 +7325,20 @@ HTML_TEMPLATE = """
         }
 
         function getSelectedPackageRows() {
-            const selected = Array.from(document.querySelectorAll('#packageLogTableBody tr.package-log-row.selected'));
-            if (selected.length > 0) return selected;
-            // Fallback: rehydrate from saved keys
-            const allRows = Array.from(document.querySelectorAll('#packageLogTableBody tr.package-log-row'));
-            const byKey = new Map();
-            allRows.forEach(r => {
-                const rawKey = r.getAttribute('data-row-key') || '';
-                try { byKey.set(decodeURIComponent(rawKey), r); } catch {}
-            });
-            const fromKeys = [];
-            selectedPackageRowKeys.forEach(k => {
-                if (byKey.has(k)) fromKeys.push(byKey.get(k));
-            });
-            return fromKeys;
+            // Live rows are data objects (most selected rows are not in the
+            // DOM with a virtualized table).  Keep the on-screen order.
+            if (selectedPackageRowKeys.size === 0) return [];
+            const fromView = packageView.filter(row => selectedPackageRowKeys.has(getPackageRowKey(row)));
+            if (fromView.length > 0) return fromView;
+            return lastPackageLogs.filter(row => selectedPackageRowKeys.has(getPackageRowKey(row)));
+        }
+
+        function packageRowCellTexts(row) {
+            if (row && typeof row.querySelectorAll === 'function') {
+                return Array.from(row.querySelectorAll('td')).map(td => (td.textContent || '').trim());
+            }
+            return [row?.time_display || row?.time || '', row?.tag || '', row?.message || row?.log || '']
+                .map(value => String(value).trim());
         }
 
         function getSelectedPackageHistoryRows() {
@@ -6982,14 +7373,15 @@ HTML_TEMPLATE = """
         }
 
         function getRowText(row) {
-            const cells = row.querySelectorAll('td');
-            const parts = Array.from(cells).map(td => (td.textContent || '').trim());
-            return parts.join(' ');
+            return packageRowCellTexts(row).join(' ');
         }
 
         function getRowMessageText(row) {
-            const msgCell = row.querySelector('td.col-message');
-            return (msgCell ? msgCell.textContent : '').trim();
+            if (row && typeof row.querySelector === 'function') {
+                const msgCell = row.querySelector('td.col-message');
+                return (msgCell ? msgCell.textContent : '').trim();
+            }
+            return String(row?.message || row?.log || '').trim();
         }
 
         let logDetailRawText = '';
@@ -7372,20 +7764,20 @@ HTML_TEMPLATE = """
         let isSelectingRows = false;
         let dragStartIndex = null;
 
+        let packageSelectionAnchor = null;
+
         function updateSelectionRange(startIdx, endIdx) {
-            const rows = Array.from(document.querySelectorAll('#packageLogTableBody tr.package-log-row'));
-            if (rows.length === 0) return;
-            const [minIdx, maxIdx] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+            // Indices address packageView, so a range can span rows that are
+            // scrolled out of the DOM.
+            if (packageView.length === 0) return;
+            const minIdx = Math.max(0, Math.min(startIdx, endIdx));
+            const maxIdx = Math.min(packageView.length - 1, Math.max(startIdx, endIdx));
             selectedPackageRowKeys.clear();
-            rows.forEach(r => {
-                const idx = parseInt(r.getAttribute('data-row-index') || '-1', 10);
-                if (idx >= minIdx && idx <= maxIdx) {
-                    const rawKey = r.getAttribute('data-row-key') || '';
-                    try { selectedPackageRowKeys.add(decodeURIComponent(rawKey)); } catch (err) {}
-                    r.classList.add('selected');
-                } else {
-                    r.classList.remove('selected');
-                }
+            for (let i = minIdx; i <= maxIdx; i++) selectedPackageRowKeys.add(getPackageRowKey(packageView[i]));
+            document.querySelectorAll('#packageLogTableBody tr.package-log-row').forEach(r => {
+                let key = '';
+                try { key = decodeURIComponent(r.getAttribute('data-row-key') || ''); } catch (err) {}
+                r.classList.toggle('selected', selectedPackageRowKeys.has(key));
             });
         }
 
@@ -7398,8 +7790,14 @@ HTML_TEMPLATE = """
             }
             isSelectingRows = true;
             const idx = parseInt(row.getAttribute('data-row-index') || '0', 10);
-            dragStartIndex = idx;
-            updateSelectionRange(idx, idx);
+            if (e.shiftKey && packageSelectionAnchor !== null) {
+                dragStartIndex = packageSelectionAnchor;
+                updateSelectionRange(packageSelectionAnchor, idx);
+            } else {
+                packageSelectionAnchor = idx;
+                dragStartIndex = idx;
+                updateSelectionRange(idx, idx);
+            }
             e.preventDefault();
         });
 
@@ -7475,11 +7873,7 @@ HTML_TEMPLATE = """
             if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
             const selectedRows = getActiveSelectedLogRows();
             if (selectedRows.length === 0) return;
-            const lines = selectedRows.map(r => {
-                const cells = r.querySelectorAll('td');
-                const parts = Array.from(cells).map(td => (td.textContent || '').trim());
-                return parts.join('\\t');
-            });
+            const lines = selectedRows.map(r => packageRowCellTexts(r).join('\\t'));
             const textToCopy = lines.join('\\n');
             try {
                 if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -7687,24 +8081,39 @@ HTML_TEMPLATE = """
             packageLastClickedIndex = null;
             packageUiPaused = false;
             pausedPackageSnapshot = [];
+            packageStickToBottom = true;
+            packageNewRowsWhileAway = 0;
+            updatePackageNewRowsButton();
+            updatePackagePauseLabel();
             if (packageContainer) packageContainer.scrollTop = 0;
             renderPackageLogTable(true);
         }
 
+        function updatePackagePauseLabel() {
+            if (!pausePackageLogBtn) return;
+            if (!packageUiPaused) {
+                pausePackageLogBtn.textContent = 'Pause';
+            } else {
+                pausePackageLogBtn.textContent = packagePausedNewRows > 0
+                    ? `Resume (+${packagePausedNewRows.toLocaleString()})`
+                    : 'Resume';
+            }
+        }
+
         function setPackagePauseState(isPaused) {
+            // Pause freezes the view only.  Rows keep arriving in the store,
+            // so Resume shows everything received in the meantime.
             packageUiPaused = isPaused;
+            packagePausedAtSeq = lastPackageSeq;
+            packagePausedNewRows = 0;
+            pausedPackageSnapshot = [];
             if (pausePackageLogBtn) {
-                pausePackageLogBtn.textContent = isPaused ? 'Resume' : 'Pause';
                 pausePackageLogBtn.classList.toggle('bg-amber-500', !isPaused);
                 pausePackageLogBtn.classList.toggle('hover:bg-amber-600', !isPaused);
                 pausePackageLogBtn.classList.toggle('bg-emerald-500', isPaused);
                 pausePackageLogBtn.classList.toggle('hover:bg-emerald-600', isPaused);
             }
-            if (isPaused) {
-                pausedPackageSnapshot = filterPackageLogs(lastPackageLogs, getPackageFilterState());
-            } else {
-                pausedPackageSnapshot = [];
-            }
+            updatePackagePauseLabel();
             renderPackageLogTable(true);
         }
 
@@ -8256,6 +8665,95 @@ def package_log_clear_api():
         })
     finally:
         conn.close()
+
+
+@app.get('/api/package-log/raw')
+def package_log_raw_api():
+    """Return the raw record of one live row (the UI receives message only)."""
+    seq = request.args.get('seq', type=int)
+    if not seq:
+        return jsonify({"ok": False, "error": "seq_required"}), 400
+    with lock:
+        for row in reversed(package_log_cache):
+            row_seq = row.get('seq', 0)
+            if row_seq == seq:
+                return jsonify({"ok": True, "seq": seq, "raw_log": row.get('log', ''), "source": "live"})
+            if row_seq < seq:
+                break
+        session_id = active_package_log_session_id
+    session_id = request.args.get('session_id', type=int) or session_id
+    if not session_id:
+        return jsonify({"ok": False, "error": "row_not_found"}), 404
+    conn = _get_package_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT raw_log FROM package_log_entries WHERE session_id = ? AND seq = ? LIMIT 1",
+            (session_id, seq),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({"ok": False, "error": "row_not_found"}), 404
+    return jsonify({"ok": True, "seq": seq, "raw_log": row["raw_log"] or "", "source": "history"})
+
+
+@app.get('/api/package-log/older')
+def package_log_older_rows_api():
+    """Rows of the live session older than `before_seq`, oldest first.
+
+    The UI calls this when the user scrolls above its in-memory store, so
+    rows evicted from the live view stay reachable without leaving the tab.
+    Within one session the writer inserts rows in seq order, so walking the
+    (session_id, id) index backwards returns them newest first.
+    """
+    before_seq = request.args.get('before_seq', type=int)
+    if not before_seq or before_seq <= 1:
+        return jsonify({"ok": True, "rows": [], "has_more": False})
+    limit = max(1, min(request.args.get('limit', default=2000, type=int) or 2000, 5000))
+    session_id = request.args.get('session_id', type=int)
+    if not session_id:
+        with lock:
+            session_id = active_package_log_session_id
+    if not session_id:
+        return jsonify({"ok": True, "rows": [], "has_more": False})
+    conn = _get_package_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT seq, time_display, device_id, device_name, level, tag, message, is_error
+            FROM package_log_entries
+            WHERE session_id = ? AND seq IS NOT NULL AND seq < ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (session_id, before_seq, limit + 1),
+        ).fetchall()
+    finally:
+        conn.close()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    rows.reverse()
+    return jsonify({
+        "ok": True,
+        "session_id": session_id,
+        "rows": [
+            {
+                "seq": row["seq"],
+                "device_id": row["device_id"] or "",
+                "device_name": row["device_name"] or "",
+                "time": row["time_display"] or "",
+                "time_display": row["time_display"] or "",
+                "level": row["level"] or "",
+                "tag": row["tag"] or "",
+                "message": row["message"] or "",
+                "pid": "",
+                "tid": "",
+                "is_error": bool(row["is_error"]),
+            }
+            for row in rows
+        ],
+        "has_more": has_more,
+    })
 
 
 @app.post('/api/package-log/export')
@@ -10809,7 +11307,9 @@ def device_manager():
                 })
         time.sleep(3)
 
-def _append_package_log_row(device_id, raw_log, time_str="", time_display="", level="", tag="", message="", is_error=False):
+def _append_package_log_row(device_id, raw_log, time_str="", time_display="", level="", tag="", message="", is_error=False,
+                            pid="", tid=""):
+    global package_log_seq
     device_name = ""
     raw_text = str(raw_log or "").strip()
     if len(raw_text) > MAX_PACKAGE_LOG_RECORD_CHARS:
@@ -10827,7 +11327,13 @@ def _append_package_log_row(device_id, raw_log, time_str="", time_display="", le
         if not _accept_exact_record("package", device_id, raw_text, session_id or ""):
             return
         device_name = get_device_name(device_id)
+        # Assign `seq` inside the lock that also orders the cache, so seq
+        # order always equals cache order.
+        package_log_seq += 1
+        seq = package_log_seq
         package_log_cache.append({
+            'seq': seq,
+            'stream': package_log_stream_id,
             'device_id': device_id,
             'device_name': device_name,
             'log': raw_text,
@@ -10836,6 +11342,8 @@ def _append_package_log_row(device_id, raw_log, time_str="", time_display="", le
             'level': level,
             'tag': tag,
             'message': message_text,
+            'pid': str(pid or ""),
+            'tid': str(tid or ""),
             'timestamp': time.time(),
             'is_error': is_error
         })
@@ -10854,7 +11362,9 @@ def _append_package_log_row(device_id, raw_log, time_str="", time_display="", le
                 message_text,
                 raw_text,
                 1 if is_error else 0,
+                seq,
             ))
+        return True
 
 def _ios_package_log_matches_target(raw_log, bundle_search):
     """Match iOS package logs by the record's process header, not its body."""
@@ -10908,15 +11418,17 @@ def process_ios_package_log_line(log_obj, feed_max=False):
     is_error = level in {"E", "F"}
     tag = log_obj.get("tag", "")
     message = log_obj.get("message", raw_log).strip()
+    pid = ""
     ios_process_match = re.match(
         rf'^{IOS_LOG_TIMESTAMP_PATTERN}\s+\S+\s+'
-        r'([^\s(\[]+)(?:\([^)]*\))?\[\d+\]\s+<[^>]+>:\s*(.*)$',
+        r'([^\s(\[]+)(?:\([^)]*\))?\[(\d+)\]\s+<[^>]+>:\s*(.*)$',
         raw_log.strip(),
         re.DOTALL,
     )
     if ios_process_match:
         tag = ios_process_match.group(1).strip()
-        message = ios_process_match.group(2).strip()
+        pid = ios_process_match.group(2)
+        message = ios_process_match.group(3).strip()
     _safe_runtime_call(
         "iOS Package Log row",
         _append_package_log_row,
@@ -10928,6 +11440,7 @@ def process_ios_package_log_line(log_obj, feed_max=False):
         tag,
         message,
         is_error,
+        pid,
     )
 
 
@@ -11067,14 +11580,18 @@ def package_log_consumer(device_id, logcat_process):
             time_display = ""
             level = ""
             tag = ""
+            pid = ""
+            tid = ""
             message = line.strip()
             # Try to parse standard logcat format: MM-DD HH:MM:SS.mmm PID TID LEVEL TAG: message
-            m = re.match(r'^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+\d+\s+\d+\s+([A-Z])\s+([^:]+):\s*(.*)$', line.strip())
+            m = re.match(r'^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([A-Z])\s+([^:]+):\s*(.*)$', line.strip())
             if m:
                 time_str = m.group(1)
-                level = m.group(2)
-                tag = m.group(3).strip()
-                message = m.group(4).strip()
+                pid = m.group(2)
+                tid = m.group(3)
+                level = m.group(4)
+                tag = m.group(5).strip()
+                message = m.group(6).strip()
                 # Prefer shorter time display to save width: HH:MM:SS.mmm
                 if ' ' in time_str:
                     time_display = time_str.split(' ', 1)[1]
@@ -11090,6 +11607,8 @@ def package_log_consumer(device_id, logcat_process):
                 tag,
                 message,
                 is_error,
+                pid,
+                tid,
             )
     except Exception as exc:
         print(f"WARNING: Android Package Log consumer {device_id} stopped: {exc}")
@@ -11199,20 +11718,111 @@ def package_pid_monitor():
                     active_package_pids.pop(did, None)
 
 
+def _package_log_ui_row(row):
+    return {field: row.get(field, "") for field in PACKAGE_LOG_UI_FIELDS}
+
+
+def _package_log_rows_after(since_seq):
+    """Rows of the current stream with seq > since_seq, oldest first.
+
+    The caller holds ``lock``.  The cache is ordered by seq, so this walks
+    back only over the rows that are actually new.
+    """
+    rows = []
+    for row in reversed(package_log_cache):
+        if row.get('seq', 0) <= since_seq or row.get('stream') != package_log_stream_id:
+            break
+        rows.append(row)
+    rows.reverse()
+    return rows
+
+
+def _emit_package_log_rows(rows, stream_id, to=None, gap=False, sync=False):
+    """Send rows as ordered `package_log_delta` chunks; never skip a row."""
+    chunk_size = max(1, PACKAGE_LOG_DELTA_CHUNK_ROWS)
+    starts = range(0, len(rows), chunk_size) if rows else [0]
+    for start in starts:
+        chunk = rows[start:start + chunk_size]
+        payload = {
+            "stream": stream_id,
+            "rows": [_package_log_ui_row(row) for row in chunk],
+            "first_seq": chunk[0]['seq'] if chunk else 0,
+            "last_seq": chunk[-1]['seq'] if chunk else 0,
+            "gap": bool(gap and start == 0),
+            "sync": bool(sync),
+        }
+        if to is not None:
+            socketio.emit('package_log_delta', payload, to=to)
+        else:
+            socketio.emit('package_log_delta', payload)
+
+
+def _bump_package_log_stream_locked():
+    """Start a new UI stream.  The caller holds ``lock``."""
+    global package_log_stream_id, package_log_last_emitted_seq
+    package_log_stream_id += 1
+    package_log_last_emitted_seq = package_log_seq
+    return package_log_stream_id
+
+
+def _emit_package_log_reset(stream_id=None):
+    """Tell every client to drop its rows and follow the given stream."""
+    with lock:
+        if stream_id is None:
+            stream_id = _bump_package_log_stream_locked()
+        payload = {
+            "stream": stream_id,
+            "package_id": target_package_name,
+            "session_id": active_package_log_session_id,
+            "last_seq": package_log_seq,
+        }
+    socketio.emit('package_log_reset', payload)
+
+
 def package_log_emitter():
+    """Push only rows the clients have not received yet.
+
+    Package Log has an independent UI pause; keep sending rows while the
+    global event-validation pause is enabled.
+    """
     while True:
-        time.sleep(1)
-        ui_rows = None
-        with lock:
-            # Package Log has an independent UI pause snapshot; keep receiving
-            # rows while the global event-validation pause is enabled.
+        time.sleep(PACKAGE_LOG_DELTA_INTERVAL_SECONDS)
+        _emit_pending_package_log_rows()
+        _emit_package_log_db_status_if_changed()
+
+
+_package_log_db_status_reported = (0, "")
+
+
+def _emit_package_log_db_status_if_changed(force=False):
+    """Tell the UI when history writes are failing or rows were given up."""
+    global _package_log_db_status_reported
+    status = (package_log_db_dropped_rows, package_log_db_last_error)
+    if not force and status == _package_log_db_status_reported:
+        return False
+    _package_log_db_status_reported = status
+    socketio.emit('package_log_db_status', {
+        "dropped_rows": status[0],
+        "error": status[1],
+        "queued_rows": package_log_db_queue.qsize(),
+    })
+    return True
+
+
+def _emit_pending_package_log_rows():
+    """One emitter pass: send every row added since the previous pass."""
+    global package_log_last_emitted_seq
+    rows = []
+    stream_id = 0
+    with lock:
+        if package_log_seq > package_log_last_emitted_seq:
             if target_package_name:
-                now = time.time()
-                while package_log_cache and now - package_log_cache[0]['timestamp'] > 1000: package_log_cache.popleft()
-                ui_limit = PACKAGE_LOG_UI_MAX_ROWS_IOS if active_platform == "ios" else PACKAGE_LOG_UI_MAX_ROWS
-                ui_rows = list(package_log_cache)[-ui_limit:]
-        if ui_rows is not None:
-            socketio.emit('package_log_cache', ui_rows)
+                rows = _package_log_rows_after(package_log_last_emitted_seq)
+                stream_id = package_log_stream_id
+            package_log_last_emitted_seq = package_log_seq
+    if rows:
+        _emit_package_log_rows(rows, stream_id)
+    return len(rows)
 
 # --- SOCKET HANDLERS ---
 @socketio.on('change_tab')
@@ -11292,7 +11902,7 @@ def _reset_runtime_for_platform_switch():
     socketio.emit('update_adrevenue_table', [])
     socketio.emit('update_callback_ad_table', [])
     socketio.emit('update_price_rotation_table', [])
-    socketio.emit('package_log_cache', [])
+    _emit_package_log_reset()
     socketio.emit('device_status', {
         "platform": active_platform,
         "connected_devices": [],
@@ -11428,7 +12038,7 @@ def cl():
     socketio.emit('update_adrevenue_table', [])
     socketio.emit('update_callback_ad_table', [])
     socketio.emit('update_price_rotation_table', [])
-    socketio.emit('package_log_cache', [])
+    _emit_package_log_reset()
     socketio.emit("installation_id_status", _build_installation_id_payload(""))
     _emit_sdk_check_results()
     socketio.emit('clear_all_logs_complete', {})
@@ -11571,7 +12181,55 @@ def spl(d):
         active_ios_package_log_buffers.clear()
         active_ios_package_log_frame_buffers.clear()
         active_ios_package_log_stream_modes.clear()
-    socketio.emit('package_log_cache', [])
+        # Bump inside the same lock that sets the new target, so the first
+        # rows of the new capture already belong to the new stream.
+        stream_id = _bump_package_log_stream_locked()
+    _emit_package_log_reset(stream_id)
+
+
+@socketio.on('package_log_sync')
+def handle_package_log_sync(data):
+    """Replay rows a (re)connecting client missed, from the server cache.
+
+    A client sends the stream it follows and the last seq it holds.  A
+    different stream means it must start over; rows older than the cache
+    window are reported as a gap (they remain in SQLite history).
+    """
+    data = data or {}
+    try:
+        since_seq = max(int(data.get('since_seq') or 0), 0)
+    except (TypeError, ValueError):
+        since_seq = 0
+    try:
+        limit = int(data.get('limit') or PACKAGE_LOG_SERVER_CACHE_ROWS)
+    except (TypeError, ValueError):
+        limit = PACKAGE_LOG_SERVER_CACHE_ROWS
+    limit = max(1, min(limit, PACKAGE_LOG_SERVER_CACHE_ROWS))
+    with lock:
+        stream_id = package_log_stream_id
+        same_stream = data.get('stream') == stream_id
+        if not same_stream:
+            since_seq = 0
+        rows = _package_log_rows_after(since_seq)
+        gap = bool(rows) and since_seq > 0 and rows[0]['seq'] > since_seq + 1
+        if len(rows) > limit:
+            rows = rows[-limit:]
+            gap = gap or since_seq > 0
+        reset_payload = {
+            "stream": stream_id,
+            "package_id": target_package_name,
+            "session_id": active_package_log_session_id,
+            "last_seq": package_log_seq,
+        }
+    if not same_stream:
+        socketio.emit('package_log_reset', reset_payload, to=request.sid)
+    _emit_package_log_rows(rows, stream_id, to=request.sid, gap=gap, sync=True)
+    if package_log_db_dropped_rows or package_log_db_last_error:
+        socketio.emit('package_log_db_status', {
+            "dropped_rows": package_log_db_dropped_rows,
+            "error": package_log_db_last_error,
+            "queued_rows": package_log_db_queue.qsize(),
+        }, to=request.sid)
 
 @socketio.on('refresh_request')
 def refresh():
