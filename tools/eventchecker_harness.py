@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 75
+RELEASE_SOURCE_BUILD = 76
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -1642,6 +1642,198 @@ def test_package_log_older_rows_and_db_status() -> None:
             lc._package_log_db_status_reported = original_reported
 
 
+class _TempPackageDb:
+    """Point Log_checker at a throwaway history DB (and retention file)."""
+
+    def __enter__(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.temp_dir.name, "history.sqlite3")
+        self.original = (lc.PACKAGE_LOG_DB_PATH, lc.active_package_log_session_id, lc.target_package_name)
+        lc.PACKAGE_LOG_DB_PATH = self.path
+        lc.active_package_log_session_id = None
+        lc.target_package_name = ""
+        return self
+
+    def __exit__(self, *exc):
+        lc.PACKAGE_LOG_DB_PATH, lc.active_package_log_session_id, lc.target_package_name = self.original
+        self.temp_dir.cleanup()
+        return False
+
+    def connect(self):
+        return lc.sqlite3.connect(self.path)
+
+
+def _add_history_session(db, package_id, started_at, rows, status="stopped", with_row_count=True):
+    conn = db.connect()
+    cur = conn.execute(
+        "INSERT INTO package_log_sessions (package_id, started_at, ended_at, status, row_count) VALUES (?, ?, ?, ?, ?)",
+        (package_id, started_at, started_at + 60, status, rows if with_row_count else None),
+    )
+    session_id = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO package_log_entries (session_id, created_at, message, raw_log, is_error, seq) VALUES (?, ?, ?, ?, 0, ?)",
+        [(session_id, started_at + index, f"{package_id} {index}", "x" * 50, index + 1) for index in range(rows)],
+    )
+    conn.commit()
+    conn.close()
+    return session_id
+
+
+def test_package_log_stuck_sessions_and_row_counts() -> None:
+    """Startup closes crashed sessions; row counts are backfilled and kept by the writer."""
+    with _TempPackageDb() as db:
+        conn = db.connect()
+        conn.execute(
+            "CREATE TABLE package_log_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, package_id TEXT NOT NULL, "
+            "started_at REAL NOT NULL, ended_at REAL, status TEXT NOT NULL DEFAULT 'running')"
+        )
+        conn.execute(
+            "CREATE TABLE package_log_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, "
+            "created_at REAL NOT NULL, time_display TEXT, device_id TEXT, device_name TEXT, level TEXT, tag TEXT, "
+            "message TEXT, raw_log TEXT, is_error INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute("INSERT INTO package_log_sessions (package_id, started_at, status) VALUES ('crashed', 100.0, 'running')")
+        conn.executemany(
+            "INSERT INTO package_log_entries (session_id, created_at, message) VALUES (1, ?, 'row')",
+            [(100.0 + index,) for index in range(7)],
+        )
+        conn.execute("INSERT INTO package_log_sessions (package_id, started_at, status) VALUES ('empty', 200.0, 'running')")
+        conn.commit()
+        conn.close()
+
+        lc._init_package_log_db()
+        conn = db.connect()
+        crashed = conn.execute("SELECT status, ended_at, row_count FROM package_log_sessions WHERE id = 1").fetchone()
+        empty = conn.execute("SELECT status, ended_at FROM package_log_sessions WHERE id = 2").fetchone()
+        has_index = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_package_log_entries_session_seq'"
+        ).fetchone()
+        conn.close()
+        _assert_equal(crashed[:2], ("interrupted", 106.0), "crashed session was not closed at its last row")
+        _assert_equal(empty, ("interrupted", 200.0), "empty crashed session was not closed at its start")
+        _assert(crashed[2] is None, "legacy session must wait for the backfill")
+        _assert(has_index, "a small history DB must get the scroll-back index at startup")
+        _assert_equal(lc._backfill_package_log_row_counts(), 2, "backfill did not fill the legacy sessions")
+        conn = db.connect()
+        _assert_equal(conn.execute("SELECT row_count FROM package_log_sessions WHERE id = 1").fetchone()[0], 7, "backfilled row count is wrong")
+        conn.close()
+
+        session_id = lc._start_package_log_session("live")
+        lc._drain_package_log_db_queue()
+        lc.package_log_db_writer_stop.clear()
+        writer = threading.Thread(target=lc._package_log_db_writer, daemon=True)
+        try:
+            for index in range(lc.PACKAGE_LOG_DB_BATCH_ROWS + 3):
+                lc._enqueue_package_log_db_row((session_id, 1.0, "t", "d", "dn", "I", "Tag", f"m{index}", f"r{index}", 0, index + 1))
+            writer.start()
+            deadline = time.time() + 15
+            count = 0
+            while time.time() < deadline:
+                conn = db.connect()
+                count = conn.execute("SELECT row_count FROM package_log_sessions WHERE id = ?", (session_id,)).fetchone()[0]
+                conn.close()
+                if count == lc.PACKAGE_LOG_DB_BATCH_ROWS + 3:
+                    break
+                time.sleep(0.2)
+            _assert_equal(count, lc.PACKAGE_LOG_DB_BATCH_ROWS + 3, "writer did not keep the session row count")
+        finally:
+            lc.package_log_db_writer_stop.set()
+            writer.join(timeout=5)
+            lc.package_log_db_writer_stop.clear()
+            lc._drain_package_log_db_queue()
+
+
+def test_package_log_sessions_api_pages() -> None:
+    with _TempPackageDb() as db:
+        lc._init_package_log_db()
+        for index in range(120):
+            _add_history_session(db, f"pkg{index}", 1000.0 + index, 1)
+        client = lc.app.test_client()
+        first = client.get("/api/package-log/sessions?limit=50").get_json()
+        _assert_equal((len(first["sessions"]), first["total"], first["has_more"]), (50, 120, True), "first session page is wrong")
+        _assert_equal(first["sessions"][0]["package_id"], "pkg119", "sessions must be newest first")
+        last = client.get("/api/package-log/sessions?limit=50&offset=100").get_json()
+        _assert_equal((len(last["sessions"]), last["has_more"]), (20, False), "last session page is wrong")
+        default = client.get("/api/package-log/sessions").get_json()
+        _assert_equal(len(default["sessions"]), 120, "the history list must no longer stop at 50 sessions")
+
+
+def test_package_log_retention_policy() -> None:
+    """Retention deletes only old, finished sessions, and only after one confirmation."""
+    with _TempPackageDb() as db:
+        lc._init_package_log_db()
+        now = time.time()
+        day = 86400
+        old_a = _add_history_session(db, "old-a", now - 30 * day, 40)
+        old_b = _add_history_session(db, "old-b", now - 20 * day, 30)
+        recent = _add_history_session(db, "recent", now - 2 * day, 20)
+        running_old = _add_history_session(db, "running-old", now - 40 * day, 10, status="running")
+        live_old = _add_history_session(db, "live-old", now - 50 * day, 10)
+        lc.active_package_log_session_id = live_old
+
+        refused = lc._apply_package_log_retention()
+        _assert_equal(refused, {"ok": False, "error": "confirmation_required"}, "retention ran without the first confirmation")
+        client = lc.app.test_client()
+        _assert_equal(client.post("/api/package-log/retention/apply", json={}).status_code, 400, "apply API must require confirm")
+        info = client.get("/api/package-log/maintenance").get_json()
+        _assert_equal((info["cleanup"]["sessions"], info["cleanup"]["rows"]), (2, 70), "cleanup preview is wrong")
+        _assert(not info["policy"]["confirmed"], "policy must start unconfirmed")
+
+        result = client.post("/api/package-log/retention/apply", json={"confirm": True}).get_json()
+        _assert_equal((result["deleted_sessions"], result["deleted_rows"]), (2, 70), "retention deleted the wrong amount")
+        conn = db.connect()
+        remaining = {row[0] for row in conn.execute("SELECT id FROM package_log_sessions")}
+        orphan_rows = conn.execute(
+            "SELECT COUNT(*) FROM package_log_entries WHERE session_id NOT IN (SELECT id FROM package_log_sessions)"
+        ).fetchone()[0]
+        conn.close()
+        _assert_equal(remaining, {recent, running_old, live_old}, "retention touched a protected or recent session")
+        _assert_equal(orphan_rows, 0, "retention left rows of deleted sessions behind")
+        _assert(lc._load_package_log_retention()["confirmed"], "the confirmation was not remembered")
+        _assert(lc._apply_package_log_retention()["ok"], "confirmed retention must run without asking again")
+
+        original_usage = lc._package_log_db_usage
+        try:
+            lc._package_log_db_usage = lambda _conn: {"file_bytes": 10 * 1024 ** 3, "used_bytes": 10 * 1024 ** 3, "free_bytes": 0}
+            lc.active_package_log_session_id = None
+            conn = lc._get_package_db_connection()
+            try:
+                plan = lc._package_log_retention_plan(conn, lc._load_package_log_retention())
+            finally:
+                conn.close()
+            reasons = [(item["id"], item["reason"]) for item in plan["sessions"]]
+            _assert(all(item_id != running_old for item_id, _ in reasons), "size policy chose a running session")
+            _assert_equal(reasons[0], (live_old, "age"), "an old finished session must go first")
+            _assert(any(reason == "size" for _, reason in reasons), "over-size history did not select sessions by size")
+        finally:
+            lc._package_log_db_usage = original_usage
+
+
+def test_package_log_compact_api() -> None:
+    with _TempPackageDb() as db:
+        lc._init_package_log_db()
+        conn = db.connect()
+        conn.execute("DROP INDEX IF EXISTS idx_package_log_entries_session_seq")
+        conn.commit()
+        conn.close()
+        _add_history_session(db, "compact", time.time(), 50)
+        client = lc.app.test_client()
+        _assert_equal(client.post("/api/package-log/compact", json={}).status_code, 400, "compact must require confirm")
+        lc.target_package_name = "com.capturing.now"
+        _assert_equal(client.post("/api/package-log/compact", json={"confirm": True}).status_code, 409, "compact must refuse while capturing")
+        lc.target_package_name = ""
+        response = client.post("/api/package-log/compact", json={"confirm": True})
+        _assert_equal(response.status_code, 200, "compact failed on an idle history")
+        conn = db.connect()
+        has_index = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_package_log_entries_session_seq'"
+        ).fetchone()
+        rows = conn.execute("SELECT COUNT(*) FROM package_log_entries").fetchone()[0]
+        conn.close()
+        _assert(has_index, "compact did not build the scroll-back index")
+        _assert_equal(rows, 50, "compact changed the stored rows")
+
+
 def test_package_log_delta_ui_contract() -> None:
     html = lc.app.test_client().get("/").get_data(as_text=True)
     for needle in (
@@ -1666,6 +1858,11 @@ def test_package_log_delta_ui_contract() -> None:
         "function releasePackageHistoryPrefix(",
         'id="searchPackageSessionBtn"',
         'id="packageDbWarning"',
+        'id="packageHistoryMaintenance"',
+        "fetch('/api/package-log/maintenance')",
+        "fetch('/api/package-log/sessions?limit=500')",
+        "fetch('/api/package-log/retention/apply'",
+        "fetch('/api/package-log/compact'",
     ):
         _assert(needle in html, f"virtualized Package Log contract missing: {needle}")
     for removed in ("maxDomRows", "function getPackageSourceLogs", "packageUiMaxRows"):
@@ -4489,6 +4686,10 @@ TESTS: List[Callable[[], None]] = [
     test_package_log_raw_and_db_seq_contract,
     test_package_log_db_writer_survives_write_errors,
     test_package_log_older_rows_and_db_status,
+    test_package_log_stuck_sessions_and_row_counts,
+    test_package_log_sessions_api_pages,
+    test_package_log_retention_policy,
+    test_package_log_compact_api,
     test_package_log_delta_ui_contract,
     test_main_script_has_unique_top_level_names,
     test_android_package_log_ignores_global_pause,

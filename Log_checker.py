@@ -1376,6 +1376,18 @@ package_log_stream_id = 0
 package_log_last_emitted_seq = 0
 PACKAGE_LOG_DB_QUEUE_MAX_ITEMS = 50000
 PACKAGE_LOG_DB_BATCH_ROWS = 500
+PACKAGE_LOG_SEQ_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_package_log_entries_session_seq ON package_log_entries(session_id, seq)"
+)
+PACKAGE_LOG_SEQ_INDEX_STARTUP_MAX_ROWS = 20000
+# History retention: whole sessions older than `days`, then the oldest
+# sessions while the database uses more than `max_bytes`.  Nothing is
+# deleted automatically until the user has confirmed a cleanup once.
+PACKAGE_LOG_RETENTION_FILENAME = "package_log_retention.json"
+PACKAGE_LOG_RETENTION_DEFAULTS = {"days": 14, "max_bytes": 2 * 1024 ** 3, "confirmed": False}
+PACKAGE_LOG_RETENTION_DELETE_CHUNK_ROWS = 5000
+PACKAGE_LOG_MAINTENANCE_FIRST_DELAY_SECONDS = 30
+PACKAGE_LOG_MAINTENANCE_INTERVAL_SECONDS = 3600
 MAX_IOS_PACKAGE_LOG_BUFFER_CHARS = 500000
 MAX_PACKAGE_LOG_RECORD_CHARS = 200000
 target_package_name = ""
@@ -1591,16 +1603,247 @@ def _init_package_log_db():
         entry_columns = {row[1] for row in conn.execute("PRAGMA table_info(package_log_entries)")}
         if "seq" not in entry_columns:
             conn.execute("ALTER TABLE package_log_entries ADD COLUMN seq INTEGER")
+        # Sessions keep their own row count so the history list never has to
+        # count millions of rows.  Older databases get NULL here and are
+        # backfilled once in the background (_backfill_package_log_row_counts).
+        session_columns = {row[1] for row in conn.execute("PRAGMA table_info(package_log_sessions)")}
+        if "row_count" not in session_columns:
+            conn.execute("ALTER TABLE package_log_sessions ADD COLUMN row_count INTEGER")
+        # A session still marked 'running' at startup was left behind by a
+        # crash or force-quit.  Close it at its last saved row.
+        conn.execute(
+            """
+            UPDATE package_log_sessions
+            SET status = 'interrupted',
+                ended_at = COALESCE(
+                    (SELECT e.created_at FROM package_log_entries e
+                     WHERE e.session_id = package_log_sessions.id
+                     ORDER BY e.id DESC LIMIT 1),
+                    started_at
+                )
+            WHERE status = 'running'
+            """
+        )
+        # The (session_id, seq) index speeds up scroll-back.  Build it now
+        # only while the table is small; a large history gets it from
+        # Compact so startup never scans the whole file.
+        small_table = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM package_log_entries LIMIT ?)",
+            (PACKAGE_LOG_SEQ_INDEX_STARTUP_MAX_ROWS + 1,),
+        ).fetchone()[0] <= PACKAGE_LOG_SEQ_INDEX_STARTUP_MAX_ROWS
+        if small_table:
+            conn.execute(PACKAGE_LOG_SEQ_INDEX_SQL)
         conn.commit()
     finally:
         conn.close()
+
+
+def _backfill_package_log_row_counts():
+    """Fill row_count for sessions recorded before the column existed.
+
+    One UPDATE computes every missing count under the write lock, so it
+    cannot race with the writer's increments: rows written earlier are
+    counted here, rows written later are added by the writer.
+    """
+    conn = _get_package_db_connection()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE package_log_sessions
+            SET row_count = (SELECT COUNT(*) FROM package_log_entries e WHERE e.session_id = package_log_sessions.id)
+            WHERE row_count IS NULL
+            """
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def _package_log_retention_path():
+    return os.path.join(os.path.dirname(PACKAGE_LOG_DB_PATH), PACKAGE_LOG_RETENTION_FILENAME)
+
+
+def _load_package_log_retention():
+    cfg = dict(PACKAGE_LOG_RETENTION_DEFAULTS)
+    try:
+        with open(_package_log_retention_path(), "r", encoding="utf-8") as handle:
+            stored = json.load(handle)
+        if isinstance(stored, dict):
+            cfg.update({key: stored[key] for key in PACKAGE_LOG_RETENTION_DEFAULTS if key in stored})
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logging.warning("Package Log retention config unreadable, using defaults: %s", exc)
+    try:
+        cfg["days"] = max(1, int(cfg["days"]))
+    except (TypeError, ValueError):
+        cfg["days"] = PACKAGE_LOG_RETENTION_DEFAULTS["days"]
+    try:
+        cfg["max_bytes"] = max(64 * 1024 ** 2, int(cfg["max_bytes"]))
+    except (TypeError, ValueError):
+        cfg["max_bytes"] = PACKAGE_LOG_RETENTION_DEFAULTS["max_bytes"]
+    cfg["confirmed"] = bool(cfg.get("confirmed"))
+    return cfg
+
+
+def _save_package_log_retention(cfg):
+    path = _package_log_retention_path()
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump({key: cfg[key] for key in PACKAGE_LOG_RETENTION_DEFAULTS}, handle, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _package_log_db_usage(conn):
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+    free_pages = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    file_bytes = 0
+    for suffix in ("", "-wal"):
+        try:
+            file_bytes += os.path.getsize(PACKAGE_LOG_DB_PATH + suffix)
+        except OSError:
+            pass
+    return {
+        "file_bytes": file_bytes,
+        "used_bytes": (page_count - free_pages) * page_size,
+        "free_bytes": free_pages * page_size,
+    }
+
+
+def _package_log_session_rows(conn):
+    return conn.execute(
+        """
+        SELECT s.id, s.package_id, s.started_at, s.ended_at, s.status,
+               CASE WHEN s.row_count IS NULL
+                    THEN (SELECT COUNT(*) FROM package_log_entries e WHERE e.session_id = s.id)
+                    ELSE s.row_count END AS row_count
+        FROM package_log_sessions s
+        ORDER BY s.started_at ASC, s.id ASC
+        """
+    ).fetchall()
+
+
+def _package_log_retention_plan(conn, cfg, now=None):
+    """Sessions the policy would delete, oldest first, with the reason.
+
+    The live session and anything still marked 'running' are never chosen.
+    Size is estimated from the average stored row, which is cheap and close
+    enough to decide how many old sessions to drop.
+    """
+    now = time.time() if now is None else now
+    with lock:
+        protected = {active_package_log_session_id} if active_package_log_session_id else set()
+    sessions = _package_log_session_rows(conn)
+    usage = _package_log_db_usage(conn)
+    total_rows = sum(row["row_count"] or 0 for row in sessions)
+    bytes_per_row = (usage["used_bytes"] / total_rows) if total_rows else 0
+    cutoff = now - cfg["days"] * 86400
+    deletable = [row for row in sessions if row["id"] not in protected and row["status"] != "running"]
+    plan = []
+    chosen = set()
+    for row in deletable:
+        if (row["started_at"] or 0) < cutoff:
+            plan.append({"id": row["id"], "reason": "age", "rows": row["row_count"] or 0})
+            chosen.add(row["id"])
+    estimated_used = usage["used_bytes"] - sum(item["rows"] for item in plan) * bytes_per_row
+    for row in deletable:
+        if estimated_used <= cfg["max_bytes"]:
+            break
+        if row["id"] in chosen:
+            continue
+        plan.append({"id": row["id"], "reason": "size", "rows": row["row_count"] or 0})
+        chosen.add(row["id"])
+        estimated_used -= (row["row_count"] or 0) * bytes_per_row
+    by_id = {row["id"]: row for row in sessions}
+    for item in plan:
+        row = by_id[item["id"]]
+        item["package_id"] = row["package_id"]
+        item["started_at"] = row["started_at"]
+    return {
+        "sessions": plan,
+        "rows": sum(item["rows"] for item in plan),
+        "estimated_bytes": int(sum(item["rows"] for item in plan) * bytes_per_row),
+        "usage": usage,
+        "total_sessions": len(sessions),
+        "total_rows": total_rows,
+    }
+
+
+def _delete_package_log_session(conn, session_id):
+    """Delete one session in small transactions so the writer is never blocked long."""
+    deleted = 0
+    while True:
+        cur = conn.execute(
+            "DELETE FROM package_log_entries WHERE id IN "
+            "(SELECT id FROM package_log_entries WHERE session_id = ? LIMIT ?)",
+            (session_id, PACKAGE_LOG_RETENTION_DELETE_CHUNK_ROWS),
+        )
+        conn.commit()
+        deleted += cur.rowcount
+        if cur.rowcount < PACKAGE_LOG_RETENTION_DELETE_CHUNK_ROWS:
+            break
+    conn.execute("DELETE FROM package_log_sessions WHERE id = ?", (session_id,))
+    conn.commit()
+    return deleted
+
+
+def _apply_package_log_retention(confirmed_by_user=False, now=None):
+    """Run the retention policy.  The first run needs the user's confirmation."""
+    cfg = _load_package_log_retention()
+    if not cfg["confirmed"] and not confirmed_by_user:
+        return {"ok": False, "error": "confirmation_required"}
+    if confirmed_by_user and not cfg["confirmed"]:
+        cfg["confirmed"] = True
+        _save_package_log_retention(cfg)
+    conn = _get_package_db_connection()
+    try:
+        plan = _package_log_retention_plan(conn, cfg, now=now)
+        deleted_sessions = 0
+        deleted_rows = 0
+        for item in plan["sessions"]:
+            with lock:
+                if item["id"] == active_package_log_session_id:
+                    continue
+            deleted_rows += _delete_package_log_session(conn, item["id"])
+            deleted_sessions += 1
+        usage = _package_log_db_usage(conn)
+    finally:
+        conn.close()
+    if deleted_sessions:
+        logging.info("Package Log retention removed %s sessions / %s rows", deleted_sessions, deleted_rows)
+    return {
+        "ok": True,
+        "deleted_sessions": deleted_sessions,
+        "deleted_rows": deleted_rows,
+        "usage": usage,
+        "policy": {key: cfg[key] for key in ("days", "max_bytes", "confirmed")},
+    }
+
+
+def _package_log_maintenance_loop():
+    """Background upkeep: backfill row counts, then apply retention hourly
+    (only after the user has confirmed a cleanup once)."""
+    try:
+        _backfill_package_log_row_counts()
+    except Exception as exc:
+        logging.warning("Package Log row-count backfill failed: %s", exc)
+    time.sleep(PACKAGE_LOG_MAINTENANCE_FIRST_DELAY_SECONDS)
+    while True:
+        try:
+            if _load_package_log_retention()["confirmed"]:
+                _apply_package_log_retention()
+        except Exception as exc:
+            logging.warning("Package Log retention pass failed: %s", exc)
+        time.sleep(PACKAGE_LOG_MAINTENANCE_INTERVAL_SECONDS)
 
 
 def _start_package_log_session(package_id):
     conn = _get_package_db_connection()
     try:
         cur = conn.execute(
-            "INSERT INTO package_log_sessions (package_id, started_at, status) VALUES (?, ?, 'running')",
+            "INSERT INTO package_log_sessions (package_id, started_at, status, row_count) VALUES (?, ?, 'running', 0)",
             (package_id, time.time()),
         )
         conn.commit()
@@ -1689,6 +1932,13 @@ def _package_log_db_writer():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             batch,
+        )
+        per_session = {}
+        for item in batch:
+            per_session[item[0]] = per_session.get(item[0], 0) + 1
+        conn.executemany(
+            "UPDATE package_log_sessions SET row_count = row_count + ? WHERE id = ?",
+            [(count, session_id) for session_id, count in per_session.items()],
         )
         conn.commit()
         batch = []
@@ -4369,7 +4619,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(75)</title>
+    <title>Event Inspector v2.5.0(76)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4463,7 +4713,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(75)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(76)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5126,6 +5376,11 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 <p id="packageHistoryMeta" class="text-[11px] text-gray-500">No session selected.</p>
+                <div id="packageHistoryMaintenance" class="flex flex-wrap items-center gap-3 text-[11px] text-gray-600 border rounded-md px-3 py-2 bg-slate-50">
+                    <span id="packageHistoryStorageInfo" class="flex-1 min-w-[280px]">Đang đọc dung lượng lịch sử…</span>
+                    <button id="applyPackageRetentionBtn" type="button" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold text-xs py-1.5 px-3 rounded-lg">Dọn lịch sử</button>
+                    <button id="compactPackageHistoryBtn" type="button" class="bg-slate-600 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-xs py-1.5 px-3 rounded-lg">Compact</button>
+                </div>
             </div>
             <div id="packageHistoryTableWrap" class="overflow-auto border rounded-md mt-3 flex-1">
                 <table class="min-w-full bg-white">
@@ -6982,11 +7237,12 @@ HTML_TEMPLATE = """
             if (!modal) return;
             modal.style.zIndex = '60';
             modal.classList.remove('hidden');
-            fetch('/api/package-log/sessions')
+            fetch('/api/package-log/sessions?limit=500')
                 .then(r => r.json())
                 .then(data => {
                     if (!data.ok) throw new Error(data.error || 'failed_to_load_sessions');
                     renderPackageHistorySessions(data);
+                    loadPackageHistoryMaintenance();
                     const select = document.getElementById('packageHistorySessionSelect');
                     if (select && packageSessionId && Array.from(select.options).some(o => o.value === String(packageSessionId))) {
                         select.value = String(packageSessionId);
@@ -7001,6 +7257,98 @@ HTML_TEMPLATE = """
                 });
         }
         document.getElementById('searchPackageSessionBtn')?.addEventListener('click', searchWholePackageSession);
+
+        // --- Package Log history maintenance (size, retention, compact) ---
+        let packageHistoryMaintenance = null;
+        function formatPackageBytes(bytes) {
+            const value = Number(bytes || 0);
+            if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+            return `${Math.round(value / 1024 / 1024)} MB`;
+        }
+        function renderPackageHistoryMaintenance(info) {
+            packageHistoryMaintenance = info;
+            const infoEl = document.getElementById('packageHistoryStorageInfo');
+            const retentionBtn = document.getElementById('applyPackageRetentionBtn');
+            const compactBtn = document.getElementById('compactPackageHistoryBtn');
+            if (!infoEl || !info || !info.ok) return;
+            const policy = info.policy || {};
+            const cleanup = info.cleanup || {};
+            const policyText = `giữ ${policy.days} ngày / ${formatPackageBytes(policy.max_bytes)}`;
+            const autoText = policy.confirmed ? 'tự dọn mỗi giờ' : 'chưa bật tự dọn';
+            const cleanupText = cleanup.sessions > 0
+                ? `Có thể dọn ${cleanup.sessions} session (${Number(cleanup.rows).toLocaleString()} dòng, khoảng ${formatPackageBytes(cleanup.estimated_bytes)}) từ ${cleanup.oldest_label}.`
+                : 'Không có session nào cần dọn.';
+            infoEl.textContent = `Lịch sử: ${formatPackageBytes(info.usage.file_bytes)} · ${info.total_sessions} session · ${Number(info.total_rows).toLocaleString()} dòng · Chính sách: ${policyText} (${autoText}). ${cleanupText}`;
+            if (retentionBtn) {
+                retentionBtn.classList.toggle('hidden', cleanup.sessions === 0 && policy.confirmed);
+                retentionBtn.textContent = cleanup.sessions > 0 ? `Dọn ${cleanup.sessions} session cũ` : 'Bật tự dọn';
+            }
+            if (compactBtn) {
+                compactBtn.disabled = !!info.capturing;
+                compactBtn.title = info.capturing
+                    ? 'Dừng Package Log trước khi Compact'
+                    : 'Thu nhỏ file lịch sử và tạo index cho cuộn xem log cũ';
+            }
+        }
+        function loadPackageHistoryMaintenance() {
+            fetch('/api/package-log/maintenance')
+                .then(r => r.json())
+                .then(renderPackageHistoryMaintenance)
+                .catch(err => {
+                    const infoEl = document.getElementById('packageHistoryStorageInfo');
+                    if (infoEl) infoEl.textContent = `Không đọc được dung lượng lịch sử: ${err}`;
+                });
+        }
+        document.getElementById('applyPackageRetentionBtn')?.addEventListener('click', () => {
+            const info = packageHistoryMaintenance || {};
+            const cleanup = info.cleanup || {};
+            const policy = info.policy || {};
+            const lines = [
+                cleanup.sessions > 0
+                    ? `Xóa vĩnh viễn ${cleanup.sessions} session (${Number(cleanup.rows).toLocaleString()} dòng, khoảng ${formatPackageBytes(cleanup.estimated_bytes)})?`
+                    : 'Bật tự dọn lịch sử Package Log?',
+                `Chính sách: giữ ${policy.days} ngày, tối đa ${formatPackageBytes(policy.max_bytes)}. Session đang ghi không bao giờ bị xóa.`,
+                'Sau khi đồng ý, app tự dọn theo chính sách mỗi giờ. Dữ liệu đã xóa không khôi phục được.',
+            ];
+            if (!confirm(lines.join(String.fromCharCode(10)))) return;
+            const infoEl = document.getElementById('packageHistoryStorageInfo');
+            if (infoEl) infoEl.textContent = 'Đang dọn lịch sử…';
+            fetch('/api/package-log/retention/apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ confirm: true }),
+            })
+                .then(r => r.json())
+                .then(result => {
+                    if (!result.ok) throw new Error(result.error || 'retention_failed');
+                    loadPackageHistorySessions();
+                })
+                .catch(err => { if (infoEl) infoEl.textContent = `Dọn lịch sử thất bại: ${err}`; });
+        });
+        document.getElementById('compactPackageHistoryBtn')?.addEventListener('click', () => {
+            const message = [
+                'Compact file lịch sử Package Log?',
+                'Với file lớn có thể mất vài chục giây; app không ghi lịch sử trong lúc đó.',
+            ].join(String.fromCharCode(10));
+            if (!confirm(message)) return;
+            const infoEl = document.getElementById('packageHistoryStorageInfo');
+            if (infoEl) infoEl.textContent = 'Đang compact lịch sử…';
+            fetch('/api/package-log/compact', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ confirm: true }),
+            })
+                .then(r => r.json())
+                .then(result => {
+                    if (!result.ok) {
+                        throw new Error(result.error === 'capture_running' ? 'đang chạy Package Log, hãy Stop trước' : (result.error || 'compact_failed'));
+                    }
+                    if (infoEl) infoEl.textContent = `Compact xong: ${formatPackageBytes(result.before.file_bytes)} → ${formatPackageBytes(result.after.file_bytes)} (${result.seconds}s).`;
+                    setTimeout(loadPackageHistoryMaintenance, 1500);
+                })
+                .catch(err => { if (infoEl) infoEl.textContent = `Compact thất bại: ${err}`; });
+        });
+
 
 
         // Live Package Log rows arrive as ordered deltas.  Each row has a
@@ -7144,11 +7492,12 @@ HTML_TEMPLATE = """
         }
 
         function loadPackageHistorySessions() {
-            fetch('/api/package-log/sessions')
+            fetch('/api/package-log/sessions?limit=500')
                 .then(r => r.json())
                 .then(data => {
                     if (!data.ok) throw new Error(data.error || 'failed_to_load_sessions');
                     renderPackageHistorySessions(data);
+                    loadPackageHistoryMaintenance();
                 })
                 .catch(err => {
                     document.getElementById('packageHistoryMeta').textContent = `Failed to load sessions: ${err}`;
@@ -8543,17 +8892,27 @@ def restart_app():
 
 @app.get('/api/package-log/sessions')
 def package_log_sessions_api():
+    """Saved sessions, newest first, with paging.
+
+    Row counts come from package_log_sessions.row_count; only sessions not
+    backfilled yet fall back to counting their rows.
+    """
+    limit = max(1, min(request.args.get('limit', default=500, type=int) or 500, 1000))
+    offset = max(request.args.get('offset', default=0, type=int) or 0, 0)
     conn = _get_package_db_connection()
     try:
+        total = conn.execute("SELECT COUNT(*) FROM package_log_sessions").fetchone()[0] or 0
         rows = conn.execute(
             """
-            SELECT s.id, s.package_id, s.started_at, s.ended_at, s.status, COUNT(e.id) AS row_count
+            SELECT s.id, s.package_id, s.started_at, s.ended_at, s.status,
+                   CASE WHEN s.row_count IS NULL
+                        THEN (SELECT COUNT(*) FROM package_log_entries e WHERE e.session_id = s.id)
+                        ELSE s.row_count END AS row_count
             FROM package_log_sessions s
-            LEFT JOIN package_log_entries e ON e.session_id = s.id
-            GROUP BY s.id
             ORDER BY s.id DESC
-            LIMIT 50
-            """
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
         ).fetchall()
         sessions = []
         for row in rows:
@@ -8567,9 +8926,87 @@ def package_log_sessions_api():
                 "status": row["status"],
                 "row_count": row["row_count"] or 0,
             })
-        return jsonify({"ok": True, "sessions": sessions})
+        return jsonify({
+            "ok": True,
+            "sessions": sessions,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(sessions) < total,
+        })
     finally:
         conn.close()
+
+
+@app.get('/api/package-log/maintenance')
+def package_log_maintenance_api():
+    """Size, retention preview and Compact state for the History view."""
+    cfg = _load_package_log_retention()
+    conn = _get_package_db_connection()
+    try:
+        plan = _package_log_retention_plan(conn, cfg)
+        has_seq_index = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_package_log_entries_session_seq'"
+        ).fetchone())
+    finally:
+        conn.close()
+    with lock:
+        capturing = bool(target_package_name)
+    oldest = min((item["started_at"] for item in plan["sessions"]), default=None)
+    return jsonify({
+        "ok": True,
+        "usage": plan["usage"],
+        "total_sessions": plan["total_sessions"],
+        "total_rows": plan["total_rows"],
+        "policy": {key: cfg[key] for key in ("days", "max_bytes", "confirmed")},
+        "cleanup": {
+            "sessions": len(plan["sessions"]),
+            "rows": plan["rows"],
+            "estimated_bytes": plan["estimated_bytes"],
+            "by_age": sum(1 for item in plan["sessions"] if item["reason"] == "age"),
+            "by_size": sum(1 for item in plan["sessions"] if item["reason"] == "size"),
+            "oldest_label": time.strftime("%Y-%m-%d", time.localtime(oldest)) if oldest else "",
+        },
+        "has_seq_index": has_seq_index,
+        "capturing": capturing,
+    })
+
+
+@app.post('/api/package-log/retention/apply')
+def package_log_retention_apply_api():
+    """Delete sessions per the retention policy.  Requires explicit confirm."""
+    payload = request.get_json(silent=True) or {}
+    if not payload.get("confirm"):
+        return jsonify({"ok": False, "error": "confirmation_required"}), 400
+    result = _apply_package_log_retention(confirmed_by_user=True)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.post('/api/package-log/compact')
+def package_log_compact_api():
+    """Rebuild the history file (VACUUM) and add the scroll-back index.
+
+    VACUUM locks the database for its whole run, so it is refused while a
+    capture is writing.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not payload.get("confirm"):
+        return jsonify({"ok": False, "error": "confirmation_required"}), 400
+    with lock:
+        if target_package_name:
+            return jsonify({"ok": False, "error": "capture_running"}), 409
+    conn = _get_package_db_connection()
+    try:
+        before = _package_log_db_usage(conn)
+        started = time.time()
+        conn.execute(PACKAGE_LOG_SEQ_INDEX_SQL)
+        conn.commit()
+        conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        after = _package_log_db_usage(conn)
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "before": before, "after": after, "seconds": round(time.time() - started, 1)})
 
 
 @app.get('/api/package-log/logs')
@@ -12279,6 +12716,7 @@ def run_server(host="0.0.0.0", port=5008):
     threading.Thread(target=package_log_emitter, daemon=True).start()
     threading.Thread(target=package_pid_monitor, daemon=True).start()
     threading.Thread(target=_package_log_db_writer, daemon=True).start()
+    threading.Thread(target=_package_log_maintenance_loop, daemon=True).start()
 
     def safe_print(msg):
         try:
