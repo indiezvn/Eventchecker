@@ -6,11 +6,11 @@ rem Use this only while Event Inspector is fully closed.
 
 set "APP_SUPPORT_DIR=%LOCALAPPDATA%\EventInspector"
 set "MANIFEST_URL=https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json"
-set "TARGET_VERSION=2026-10-20-3-2.5.0-76"
+set "TARGET_VERSION=2026-10-20-4-2.5.0-77"
 set "UPDATES_DIR_V250=%APP_SUPPORT_DIR%\updates_v250"
 
 echo Event Inspector update reset (Windows)
-echo Target release: v2.5.0(76)
+echo Target release: v2.5.0(77)
 echo Target folder: %APP_SUPPORT_DIR%
 echo.
 echo Make sure Event Inspector is fully closed before continuing.
