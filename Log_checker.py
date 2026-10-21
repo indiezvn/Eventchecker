@@ -1635,6 +1635,10 @@ def _init_package_log_db():
         session_columns = {row[1] for row in conn.execute("PRAGMA table_info(package_log_sessions)")}
         if "row_count" not in session_columns:
             conn.execute("ALTER TABLE package_log_sessions ADD COLUMN row_count INTEGER")
+        # Platform of the capture (android / ios).  Older sessions keep NULL
+        # and are resolved from the package id when listed.
+        if "platform" not in session_columns:
+            conn.execute("ALTER TABLE package_log_sessions ADD COLUMN platform TEXT")
         # A session still marked 'running' at startup was left behind by a
         # crash or force-quit.  Close it at its last saved row.
         conn.execute(
@@ -1869,8 +1873,8 @@ def _start_package_log_session(package_id):
     conn = _get_package_db_connection()
     try:
         cur = conn.execute(
-            "INSERT INTO package_log_sessions (package_id, started_at, status, row_count) VALUES (?, ?, 'running', 0)",
-            (package_id, time.time()),
+            "INSERT INTO package_log_sessions (package_id, started_at, status, row_count, platform) VALUES (?, ?, 'running', 0, ?)",
+            (package_id, time.time(), "ios" if active_platform == "ios" else "android"),
         )
         conn.commit()
         return cur.lastrowid
@@ -4644,7 +4648,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(80)</title>
+    <title>Event Inspector v2.5.0(81)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4740,7 +4744,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(80)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(81)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5384,7 +5388,13 @@ HTML_TEMPLATE = """
             <div class="flex flex-col gap-4">
                 <div class="grid grid-cols-1 xl:grid-cols-[260px_110px_110px_150px_1fr_1fr_1fr_1fr] gap-3 items-end">
                     <div>
-                        <label for="packageHistorySessionSelect" class="block text-[11px] font-medium text-gray-700 mb-1">Saved Sessions:</label>
+                        <div class="flex items-center justify-between gap-2 mb-1">
+                            <label for="packageHistorySessionSelect" class="block text-[11px] font-medium text-gray-700">Saved Sessions:</label>
+                            <div id="packageHistoryPlatformSwitch" class="inline-flex rounded-md border border-slate-300 overflow-hidden text-[11px] font-semibold" title="Android and iOS sessions are listed separately">
+                                <button type="button" data-platform="android" class="px-2 py-0.5">Android</button>
+                                <button type="button" data-platform="ios" class="px-2 py-0.5 border-l border-slate-300">iOS</button>
+                            </div>
+                        </div>
                         <select id="packageHistorySessionSelect" class="w-full p-2 text-[11px] border rounded-md shadow-sm"></select>
                     </div>
                     <div>
@@ -5689,11 +5699,17 @@ HTML_TEMPLATE = """
             if (radio) radio.checked = true;
             renderHistoryQuickFilterOptions();
         }
+        // Recorded Logs show one platform at a time; its quick filters come
+        // from that platform's list.
+        var packageHistoryPlatform = 'android';
+        function historyQuickFilters() {
+            return (packageQuickFilters && packageQuickFilters[packageHistoryPlatform]) || [];
+        }
         function renderHistoryQuickFilterOptions() {
             const select = document.getElementById('packageHistoryQuickFilter');
             if (!select) return;
             const current = select.value;
-            const items = availableQuickFilters();
+            const items = historyQuickFilters();
             select.innerHTML = '<option value="">All</option>' + items.map(f => `<option value="${qfEsc(f.id)}">${qfEsc(f.name)}</option>`).join('');
             select.value = items.some(f => f.id === current) ? current : '';
         }
@@ -7893,7 +7909,8 @@ HTML_TEMPLATE = """
             if (!modal) return;
             modal.style.zIndex = '60';
             modal.classList.remove('hidden');
-            fetch('/api/package-log/sessions?limit=500')
+            setPackageHistoryPlatform(activePlatform, false);
+            fetch(`/api/package-log/sessions?limit=500&platform=${packageHistoryPlatform}`)
                 .then(r => r.json())
                 .then(data => {
                     if (!data.ok) throw new Error(data.error || 'failed_to_load_sessions');
@@ -8154,8 +8171,37 @@ HTML_TEMPLATE = """
             else tbody.innerHTML = html;
         }
 
+        function renderPackageHistoryPlatformSwitch() {
+            document.querySelectorAll('#packageHistoryPlatformSwitch button').forEach(btn => {
+                const on = btn.dataset.platform === packageHistoryPlatform;
+                btn.classList.toggle('bg-indigo-600', on);
+                btn.classList.toggle('text-white', on);
+                btn.classList.toggle('bg-white', !on);
+                btn.classList.toggle('text-slate-700', !on);
+            });
+        }
+        function setPackageHistoryPlatform(platform, reload = true) {
+            packageHistoryPlatform = platform === 'ios' ? 'ios' : 'android';
+            renderPackageHistoryPlatformSwitch();
+            renderHistoryQuickFilterOptions();
+            if (!reload) return;
+            const select = document.getElementById('packageHistorySessionSelect');
+            if (select) select.value = '';
+            packageHistoryLoadedRows = [];
+            packageHistoryOffset = 0;
+            packageHistoryHasMore = false;
+            updatePackageHistoryLoadMoreButton();
+            const tbody = document.getElementById('packageHistoryTableBody');
+            if (tbody) tbody.innerHTML = '';
+            loadPackageHistorySessions();
+        }
+        document.getElementById('packageHistoryPlatformSwitch')?.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-platform]');
+            if (btn && btn.dataset.platform !== packageHistoryPlatform) setPackageHistoryPlatform(btn.dataset.platform);
+        });
+
         function loadPackageHistorySessions() {
-            fetch('/api/package-log/sessions?limit=500')
+            fetch(`/api/package-log/sessions?limit=500&platform=${packageHistoryPlatform}`)
                 .then(r => r.json())
                 .then(data => {
                     if (!data.ok) throw new Error(data.error || 'failed_to_load_sessions');
@@ -8191,7 +8237,7 @@ HTML_TEMPLATE = """
                 q3: tagKeyword,
                 q4: keyword3,
                 qf: quickId,
-                qp: quickFilterPlatform(),
+                qp: packageHistoryPlatform,
                 offset: String(offset),
                 limit: String(PACKAGE_HISTORY_PAGE_SIZE),
             });
@@ -8218,7 +8264,7 @@ HTML_TEMPLATE = """
                             keyword2 ? `text2:${keyword2}` : '',
                             keyword3 ? `text3:${keyword3}` : '',
                             tagKeyword ? `tag:${tagKeyword}` : '',
-                            quickId ? `quick:${(packageQuickFilters.find(f => f.id === quickId) || {}).name || quickId}` : '',
+                            quickId ? `quick:${(historyQuickFilters().find(f => f.id === quickId) || {}).name || quickId}` : '',
                         ].filter(Boolean).join(' | ');
                         meta.textContent = `Selected: ${current.package_id} | Started: ${current.started_label} | Status: ${current.status} | Showing: ${packageHistoryLoadedRows.length} / ${data.total_rows}${filters ? ` | Filter: ${filters}` : ''}`;
                     }
@@ -8256,7 +8302,7 @@ HTML_TEMPLATE = """
                     q3: filteredOnly ? tagKeyword : '',
                     q4: filteredOnly ? keyword3 : '',
                     qf: filteredOnly ? quickId : '',
-                    qp: quickFilterPlatform(),
+                    qp: packageHistoryPlatform,
                     filtered_only: filteredOnly,
                 }),
             })
@@ -8422,6 +8468,10 @@ HTML_TEMPLATE = """
             logDetailRawText = lines.join('\\n');
             logDetailIsJsonView = false;
             logDetailContent.textContent = logDetailRawText;
+            // Always above Recorded Logs / session search (z 50-60) and the
+            // quick filter editor (70); equal z-index stacking differs between
+            // the Windows and macOS webviews.
+            logDetailModal.style.zIndex = '80';
             logDetailModal.classList.remove('hidden');
         }
 
@@ -8791,6 +8841,7 @@ HTML_TEMPLATE = """
         openPackageHistoryBtn?.addEventListener('click', () => {
             packageHistoryModal?.classList.remove('hidden');
             clearRecordedPackageHistoryFilters(false);
+            setPackageHistoryPlatform(activePlatform, false);
             loadPackageHistorySessions();
         });
         closePackageHistoryModal?.addEventListener('click', () => {
@@ -10017,6 +10068,41 @@ def restart_app():
     os._exit(0)
 
 
+def _package_session_platform_resolver():
+    """Return f(package_id, stored_platform) -> 'android' | 'ios'.
+
+    Sessions saved before the platform column existed are matched against
+    the project list (read only); otherwise an id with a dot is an Android
+    package and one without is an iOS bundle search name.
+    """
+    android_ids, ios_ids = set(), set()
+    for project in _load_package_log_presets() or []:
+        if isinstance(project, dict):
+            if (project.get("android") or {}).get("id"):
+                android_ids.add(str(project["android"]["id"]).strip().lower())
+            if (project.get("ios") or {}).get("id"):
+                ios_ids.add(str(project["ios"]["id"]).strip().lower())
+
+    def resolve(package_id, stored=None):
+        if stored in ("android", "ios"):
+            return stored
+        key = str(package_id or "").strip().lower()
+        if key in ios_ids and key not in android_ids:
+            return "ios"
+        if key in android_ids:
+            return "android"
+        return "android" if "." in key else "ios"
+
+    return resolve
+
+
+def _package_session_platform(conn, session_id):
+    row = conn.execute("SELECT package_id, platform FROM package_log_sessions WHERE id = ?", (session_id,)).fetchone()
+    if not row:
+        return None
+    return _package_session_platform_resolver()(row["package_id"], row["platform"])
+
+
 @app.get('/api/package-log/sessions')
 def package_log_sessions_api():
     """Saved sessions, newest first, with paging.
@@ -10026,21 +10112,36 @@ def package_log_sessions_api():
     """
     limit = max(1, min(request.args.get('limit', default=500, type=int) or 500, 1000))
     offset = max(request.args.get('offset', default=0, type=int) or 0, 0)
+    platform_filter = (request.args.get('platform') or '').strip().lower()
+    if platform_filter not in ('', 'android', 'ios'):
+        return jsonify({"ok": False, "error": "invalid_platform"}), 400
+    resolve_platform = _package_session_platform_resolver()
     conn = _get_package_db_connection()
     try:
-        total = conn.execute("SELECT COUNT(*) FROM package_log_sessions").fetchone()[0] or 0
-        rows = conn.execute(
-            """
-            SELECT s.id, s.package_id, s.started_at, s.ended_at, s.status,
-                   CASE WHEN s.row_count IS NULL
-                        THEN (SELECT COUNT(*) FROM package_log_entries e WHERE e.session_id = s.id)
-                        ELSE s.row_count END AS row_count
-            FROM package_log_sessions s
-            ORDER BY s.id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        ).fetchall()
+        # The platform of older sessions is resolved in Python, so filter
+        # on ids first, then page and count rows only for that page.
+        candidates = [
+            row["id"]
+            for row in conn.execute("SELECT id, package_id, platform FROM package_log_sessions ORDER BY id DESC")
+            if not platform_filter or resolve_platform(row["package_id"], row["platform"]) == platform_filter
+        ]
+        total = len(candidates)
+        page_ids = candidates[offset:offset + limit]
+        rows = []
+        if page_ids:
+            marks = ",".join("?" * len(page_ids))
+            rows = conn.execute(
+                f"""
+                SELECT s.id, s.package_id, s.started_at, s.ended_at, s.status, s.platform,
+                       CASE WHEN s.row_count IS NULL
+                            THEN (SELECT COUNT(*) FROM package_log_entries e WHERE e.session_id = s.id)
+                            ELSE s.row_count END AS row_count
+                FROM package_log_sessions s
+                WHERE s.id IN ({marks})
+                ORDER BY s.id DESC
+                """,
+                page_ids,
+            ).fetchall()
         sessions = []
         for row in rows:
             started_label = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["started_at"])) if row["started_at"] else ""
@@ -10051,6 +10152,7 @@ def package_log_sessions_api():
                 "ended_at": row["ended_at"],
                 "started_label": started_label,
                 "status": row["status"],
+                "platform": resolve_platform(row["package_id"], row["platform"]),
                 "row_count": row["row_count"] or 0,
             })
         return jsonify({
@@ -10189,7 +10291,7 @@ def package_log_rows_api():
             base_where += tag_search_clause()
             params.append(f"%{tag_keyword}%")
         if quick_filter_id:
-            quick_clause, quick_params = _package_quick_filter_sql(quick_filter_id, quick_platform)
+            quick_clause, quick_params = _package_quick_filter_sql(quick_filter_id, _package_session_platform(conn, session_id) or quick_platform)
             if quick_clause is None:
                 return jsonify({"ok": False, "error": "unknown_quick_filter"}), 400
             base_where += quick_clause
@@ -10395,7 +10497,7 @@ def package_log_export_api():
             sql += tag_search_clause()
             params.append(f"%{tag_keyword}%")
         if quick_filter_id and filtered_only:
-            quick_clause, quick_params = _package_quick_filter_sql(quick_filter_id, quick_platform)
+            quick_clause, quick_params = _package_quick_filter_sql(quick_filter_id, _package_session_platform(conn, session_id) or quick_platform)
             if quick_clause is None:
                 return jsonify({"ok": False, "error": "unknown_quick_filter"}), 400
             sql += quick_clause

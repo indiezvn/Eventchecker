@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 80
+RELEASE_SOURCE_BUILD = 81
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2290,7 +2290,7 @@ def test_package_log_delta_ui_contract() -> None:
         'id="packageDbWarning"',
         'id="packageHistoryMaintenance"',
         "fetch('/api/package-log/maintenance')",
-        "fetch('/api/package-log/sessions?limit=500')",
+        "fetch(`/api/package-log/sessions?limit=500&platform=${packageHistoryPlatform}`)",
         "fetch('/api/package-log/retention/apply'",
         "fetch('/api/package-log/compact'",
     ):
@@ -3338,6 +3338,78 @@ def test_package_log_switch_project_keeps_session() -> None:
             lc.active_package_log_session_id = None
 
 
+def test_package_history_split_by_platform() -> None:
+    """Recorded Logs list Android and iOS sessions separately and filter each with its own quick filters."""
+    source_text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
+    for needle in (
+        'id="packageHistoryPlatformSwitch"',
+        "fetch(`/api/package-log/sessions?limit=500&platform=${packageHistoryPlatform}`)",
+        "qp: packageHistoryPlatform,",
+        "historyQuickFilters().find(f => f.id === quickId)",
+        "logDetailModal.style.zIndex = '80';",
+    ):
+        _assert(needle in source_text, f"Recorded platform split contract missing: {needle}")
+    _assert("packageQuickFilters.find(" not in source_text, "packageQuickFilters is per platform; .find on it throws")
+    original_data_dir = os.environ.get("EVENTINSPECTOR_DATA_DIR")
+    original_presets = lc._load_package_log_presets
+    original_platform = lc.active_platform
+    with tempfile.TemporaryDirectory() as temp_dir, _TempPackageDb() as db:
+        os.environ["EVENTINSPECTOR_DATA_DIR"] = temp_dir
+        lc._load_package_log_presets = lambda: [{"code": "NG", "android": {"id": "com.indiez.nonogram"}, "ios": {"id": "PixelArt"}}]
+        try:
+            lc._init_package_log_db()
+            conn = db.connect()
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(package_log_sessions)")}
+            _assert("platform" in columns, "sessions need a platform column")
+            # Sessions from before the column: resolved from the package id.
+            old_android = conn.execute("INSERT INTO package_log_sessions (package_id, started_at, status) VALUES ('com.indiez.nonogram', 1, 'stopped')").lastrowid
+            old_ios = conn.execute("INSERT INTO package_log_sessions (package_id, started_at, status) VALUES ('PixelArt', 2, 'stopped')").lastrowid
+            old_unknown_ios = conn.execute("INSERT INTO package_log_sessions (package_id, started_at, status) VALUES ('SomeBundle', 3, 'stopped')").lastrowid
+            for sid, tag, message in ((old_android, "Adjust", "event tracked"), (old_ios, "", "[Adjust]: event tracked")):
+                conn.execute(
+                    "INSERT INTO package_log_entries (session_id, created_at, time_display, device_id, device_name, level, tag, message, raw_log) VALUES (?, 1, 't', 'd', 'Dev', 'I', ?, ?, ?)",
+                    (sid, tag, message, f"t I {tag}: {message}"),
+                )
+            conn.commit()
+            conn.close()
+            lc.active_platform = "ios"
+            new_ios = lc._start_package_log_session("TrainIdle")
+            lc._finish_package_log_session(new_ios)
+            lc.active_platform = "android"
+            new_android = lc._start_package_log_session("com.indiez.train.miner")
+            lc._finish_package_log_session(new_android)
+            client = lc.app.test_client()
+
+            def ids(platform):
+                data = client.get(f"/api/package-log/sessions?platform={platform}").get_json()
+                _assert(data["ok"], f"sessions API failed for {platform}")
+                _assert(all(s["platform"] == platform for s in data["sessions"]), f"{platform} list holds another platform")
+                _assert_equal(data["total"], len(data["sessions"]), f"{platform} total must count only that platform")
+                return sorted(s["id"] for s in data["sessions"])
+
+            _assert_equal(ids("android"), sorted([old_android, new_android]), "Android sessions are wrong")
+            _assert_equal(ids("ios"), sorted([old_ios, old_unknown_ios, new_ios]), "iOS sessions are wrong")
+            _assert_equal(len(client.get("/api/package-log/sessions").get_json()["sessions"]), 5, "no platform must list every session")
+            _assert_equal(client.get("/api/package-log/sessions?platform=web").status_code, 400, "unknown platform must be refused")
+
+            def adjust(session_id, qp):
+                data = client.get(f"/api/package-log/logs?session_id={session_id}&qf=adjust&qp={qp}").get_json()
+                _assert(data["ok"], f"quick filter failed: {data}")
+                return [row["message"] for row in data["rows"]]
+
+            # The session's own platform decides which quick filter list applies,
+            # whatever platform the app is on (qp).
+            _assert_equal(adjust(old_ios, "android"), ["[Adjust]: event tracked"], "iOS session must use the iOS Adjust filter")
+            _assert_equal(adjust(old_android, "ios"), ["event tracked"], "Android session must use the Android Adjust filter (tag)")
+        finally:
+            lc._load_package_log_presets = original_presets
+            lc.active_platform = original_platform
+            if original_data_dir is None:
+                os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
+            else:
+                os.environ["EVENTINSPECTOR_DATA_DIR"] = original_data_dir
+
+
 def test_package_quick_filters_api() -> None:
     """Quick filters are user settings in the data dir, one file per platform."""
     original_data_dir = os.environ.get("EVENTINSPECTOR_DATA_DIR")
@@ -3506,6 +3578,11 @@ def test_package_quick_filter_history_query() -> None:
             client = lc.app.test_client()
 
             def messages(qf, qp="android"):
+                # The session's own platform picks the quick filter list.
+                db_conn = db.connect()
+                db_conn.execute("UPDATE package_log_sessions SET platform = ? WHERE id = ?", (qp, session_id))
+                db_conn.commit()
+                db_conn.close()
                 data = client.get(f"/api/package-log/logs?session_id={session_id}&qf={qf}&qp={qp}").get_json()
                 _assert(data["ok"], f"history query failed for {qf}: {data}")
                 return sorted(row["message"] for row in data["rows"])
@@ -3540,7 +3617,11 @@ def test_package_quick_filter_history_query() -> None:
             _assert_equal(messages("pct"), ["100%_off [IAP] Entitlement adjust"], "filter text must be literal, not LIKE wildcards")
             _assert_equal(messages("iap"), ["100%_off [IAP] Entitlement adjust"], "tag + filter must ignore case")
             _assert_equal(messages("iap_lower"), ["100%_off [IAP] Entitlement adjust"], "filters must never be case sensitive")
-            _assert_equal(client.get(f"/api/package-log/logs?session_id={session_id}&qf=pct&qp=ios").status_code, 400, "an Android filter must not exist in the iOS list")
+            db_conn = db.connect()
+            db_conn.execute("UPDATE package_log_sessions SET platform = 'ios' WHERE id = ?", (session_id,))
+            db_conn.commit()
+            db_conn.close()
+            _assert_equal(client.get(f"/api/package-log/logs?session_id={session_id}&qf=pct&qp=android").status_code, 400, "an Android filter must not exist in an iOS session's list")
         finally:
             if original_data_dir is None:
                 os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
@@ -5445,6 +5526,7 @@ TESTS: List[Callable[[], None]] = [
     test_preset_revert_protection_contract,
     test_rewarded_bidding_filter_contract,
     test_package_quick_filters_api,
+    test_package_history_split_by_platform,
     test_package_log_switch_project_keeps_session,
     test_package_quick_filter_history_query,
     test_package_quick_filter_upgrade_backup_export_import,
