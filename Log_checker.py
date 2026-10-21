@@ -4644,7 +4644,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(77)</title>
+    <title>Event Inspector v2.5.0(79)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4674,12 +4674,14 @@ HTML_TEMPLATE = """
         #packageLogTableBody tr.selected, #packageHistoryTableBody tr.selected { background-color: #bfdbfe !important; }
         /* Live Package Log: virtualized, one line per row (double-click shows the full record). */
         #packageLogTableLive { table-layout: fixed; width: 100%; }
-        #packageLogTableLive th.col-time { width: 110px; }
-        #packageLogTableLive th.col-tag { width: 160px; }
-        #packageLogTableBody tr.package-log-row { height: 22px; }
+        #packageLogTableLive th.col-time { width: 92px; }
+        #packageLogTableLive th.col-tag { width: 140px; }
+        #packageLogTableLive thead th { padding-top: 4px; padding-bottom: 4px; font-size: 11px; }
+        /* Compact rows: 10px text, 18px rows (the virtual scroller measures the real height). */
+        #packageLogTableBody tr.package-log-row { height: 18px; }
         #packageLogTableBody tr.package-log-row td {
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-            padding-top: 0; padding-bottom: 0; height: 22px; line-height: 22px;
+            padding-top: 0; padding-bottom: 0; height: 18px; line-height: 18px; font-size: 10px;
             border-bottom: 1px solid #f3f4f6; box-sizing: border-box;
         }
         #packageLogTableBody tr.package-log-spacer td { padding: 0; border: 0; }
@@ -4738,7 +4740,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(77)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(79)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -4747,7 +4749,7 @@ HTML_TEMPLATE = """
                     <button id="manualRestartBtn" class="bg-slate-500 hover:bg-slate-600 text-white text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm">Restart</button>
                     <div id="uiZoomControls" class="flex items-center border border-slate-300 rounded-lg overflow-hidden shadow-sm bg-white text-slate-700 text-sm font-semibold" title="Text size (Ctrl/Cmd − / = / 0)">
                         <button id="uiZoomOut" type="button" class="px-2.5 py-2 hover:bg-slate-100" title="Smaller text (Ctrl/Cmd −)">A−</button>
-                        <button id="uiZoomReset" type="button" class="px-2 py-2 border-x border-slate-300 hover:bg-slate-100 min-w-[3.5rem]" title="Reset to 100% (Ctrl/Cmd 0)">100%</button>
+                        <button id="uiZoomReset" type="button" class="px-2 py-2 border-x border-slate-300 hover:bg-slate-100 min-w-[3.5rem]" title="Reset to the default size (Ctrl/Cmd 0)">{{ (ui_zoom * 100)|round|int }}%</button>
                         <button id="uiZoomIn" type="button" class="px-2.5 py-2 hover:bg-slate-100" title="Larger text (Ctrl/Cmd =)">A+</button>
                     </div>
                     <button id="platformBtn" class="bg-white hover:bg-gray-50 text-slate-700 border border-slate-300 text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm">Platform: Android</button>
@@ -5026,7 +5028,7 @@ HTML_TEMPLATE = """
                     <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_150px_minmax(0,1fr)] gap-4 items-start">
                          <div>
                             <label for="specificEventInput" class="block text-xs font-medium text-gray-700 mb-1">Filter by Event Names:</label>
-                            <textarea id="specificEventInput" rows="4" class="w-full p-2 border rounded-md shadow-sm" placeholder="Leave empty to show all events..."></textarea>
+                            <textarea id="specificEventInput" class="w-full h-[4.25rem] resize-none p-2 border rounded-md shadow-sm" placeholder="Leave empty to show all events..."></textarea>
                          </div>
                          <div>
                             <label class="block text-xs font-medium text-gray-700 mb-1">Source Filter:</label>
@@ -5047,7 +5049,7 @@ HTML_TEMPLATE = """
                          </div>
                          <div>
                             <label for="specificParamInput" class="block text-xs font-medium text-gray-700 mb-1">Filter by Text:</label>
-                            <textarea id="specificParamInput" rows="4" class="w-full p-2 border rounded-md shadow-sm" placeholder="Leave empty to show all raw logs..."></textarea>
+                            <textarea id="specificParamInput" class="w-full h-[4.25rem] resize-none p-2 border rounded-md shadow-sm" placeholder="Leave empty to show all raw logs..."></textarea>
                          </div>
                     </div>
                 </div>
@@ -5582,7 +5584,8 @@ HTML_TEMPLATE = """
         // padding, gaps) follows; the level is saved on the server because the
         // desktop webview does not keep localStorage between launches.
         var UI_ZOOM_LEVELS = [0.7, 0.75, 0.8, 0.85, 0.9, 1, 1.1, 1.25, 1.4];
-        var currentUiZoom = Number(document.documentElement.dataset.uiZoom) || 1;
+        var UI_DEFAULT_ZOOM = {{ ui_default_zoom }};
+        var currentUiZoom = Number(document.documentElement.dataset.uiZoom) || UI_DEFAULT_ZOOM;
         var uiZoomSaveTimer = null;
         function renderUiZoomLabel() {
             const label = document.getElementById('uiZoomReset');
@@ -5605,18 +5608,18 @@ HTML_TEMPLATE = """
         }
         function stepUiZoom(direction) {
             let index = UI_ZOOM_LEVELS.indexOf(currentUiZoom);
-            if (index < 0) index = UI_ZOOM_LEVELS.indexOf(1);
+            if (index < 0) index = UI_ZOOM_LEVELS.indexOf(UI_DEFAULT_ZOOM);
             index = Math.max(0, Math.min(UI_ZOOM_LEVELS.length - 1, index + direction));
             applyUiZoom(UI_ZOOM_LEVELS[index]);
         }
         document.getElementById('uiZoomOut')?.addEventListener('click', () => stepUiZoom(-1));
         document.getElementById('uiZoomIn')?.addEventListener('click', () => stepUiZoom(1));
-        document.getElementById('uiZoomReset')?.addEventListener('click', () => applyUiZoom(1));
+        document.getElementById('uiZoomReset')?.addEventListener('click', () => applyUiZoom(UI_DEFAULT_ZOOM));
         document.addEventListener('keydown', (e) => {
             if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
             if (e.key === '-' || e.key === '_') { e.preventDefault(); stepUiZoom(-1); }
             else if (e.key === '=' || e.key === '+') { e.preventDefault(); stepUiZoom(1); }
-            else if (e.key === '0') { e.preventDefault(); applyUiZoom(1); }
+            else if (e.key === '0') { e.preventDefault(); applyUiZoom(UI_DEFAULT_ZOOM); }
         });
         renderUiZoomLabel();
 
@@ -7597,7 +7600,7 @@ HTML_TEMPLATE = """
         const PACKAGE_VIEW_OVERSCAN = 40;
         let packageView = [];
         let packageViewSignature = '';
-        let packageRowHeight = 22;
+        let packageRowHeight = 18;
         let packageStickToBottom = true;
         let packageNewRowsWhileAway = 0;
         let packagePausedAtSeq = 0;
@@ -9369,26 +9372,37 @@ HTML_TEMPLATE = """
 
 UI_SETTINGS_FILENAME = "ui_settings.json"
 UI_ZOOM_LEVELS = (0.7, 0.75, 0.8, 0.85, 0.9, 1.0, 1.1, 1.25, 1.4)
+# Default text size for users who never picked one (A-/A+ still go 70-140%).
+UI_DEFAULT_ZOOM = 0.85
 
 
 def _ui_settings_path():
     return os.path.join(_user_data_dir(), UI_SETTINGS_FILENAME)
 
 
-def _load_ui_settings():
-    """Per-machine UI preferences (the desktop webview drops localStorage)."""
-    settings = {"zoom": 1.0, "hide_top": False}
+def _read_stored_ui_settings():
+    """Only the values the user chose; anything missing uses the default."""
+    stored = {}
     try:
         with open(_ui_settings_path(), "r", encoding="utf-8") as handle:
-            stored = json.load(handle)
-        zoom = float(stored.get("zoom", 1.0))
-        if zoom in UI_ZOOM_LEVELS:
-            settings["zoom"] = zoom
-        if isinstance(stored.get("hide_top"), bool):
-            settings["hide_top"] = stored["hide_top"]
-    except (OSError, ValueError, TypeError, AttributeError):
+            raw = json.load(handle)
+        if isinstance(raw, dict):
+            try:
+                zoom = float(raw.get("zoom"))
+                if zoom in UI_ZOOM_LEVELS:
+                    stored["zoom"] = zoom
+            except (TypeError, ValueError):
+                pass
+            if isinstance(raw.get("hide_top"), bool):
+                stored["hide_top"] = raw["hide_top"]
+    except (OSError, ValueError):
         pass
-    return settings
+    return stored
+
+
+def _load_ui_settings():
+    """Per-machine UI preferences (the desktop webview drops localStorage)."""
+    return {"zoom": UI_DEFAULT_ZOOM, "hide_top": False, **_read_stored_ui_settings()}
 
 
 @app.post('/api/ui-settings')
@@ -9396,7 +9410,7 @@ def ui_settings_api():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict) or not ({"zoom", "hide_top"} & payload.keys()):
         return jsonify({"ok": False, "error": "invalid_settings"}), 400
-    settings = _load_ui_settings()
+    stored = _read_stored_ui_settings()
     if "zoom" in payload:
         try:
             zoom = float(payload["zoom"])
@@ -9404,18 +9418,20 @@ def ui_settings_api():
             return jsonify({"ok": False, "error": "invalid_zoom"}), 400
         if zoom not in UI_ZOOM_LEVELS:
             return jsonify({"ok": False, "error": "invalid_zoom"}), 400
-        settings["zoom"] = zoom
+        stored["zoom"] = zoom
     if "hide_top" in payload:
         if not isinstance(payload["hide_top"], bool):
             return jsonify({"ok": False, "error": "invalid_hide_top"}), 400
-        settings["hide_top"] = payload["hide_top"]
+        stored["hide_top"] = payload["hide_top"]
+    # Write only what the user changed, so a later default (e.g. a new
+    # default zoom) still reaches users who never picked a zoom level.
     path = _ui_settings_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(settings, handle)
+        json.dump(stored, handle)
     os.replace(tmp_path, path)
-    return jsonify({"ok": True, **settings})
+    return jsonify({"ok": True, **_load_ui_settings()})
 
 
 # --- Package Log quick filters (user-editable, saved per machine) ---
@@ -9684,6 +9700,7 @@ def index():
         package_quick_filter_defaults={p: _default_package_quick_filters(p) for p in PACKAGE_QUICK_FILTER_PLATFORMS},
         native_file_dialog=bool(webview and getattr(webview, "windows", None)),
         ui_zoom_px=round(16 * ui_zoom, 2),
+        ui_default_zoom=UI_DEFAULT_ZOOM,
         default_event_names=sorted(event_specific_params.keys()),
         current_profile_name=active_profile_name,
         profile_revision=profile_revision,
