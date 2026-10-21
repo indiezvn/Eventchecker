@@ -44,13 +44,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-10-21-5-2.5.0-80"
-CURRENT_RELEASE_BUILD = 80
+CURRENT_RELEASE_VERSION = "2026-10-21-3-2.5.0-79"
+CURRENT_RELEASE_BUILD = 79
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 80
+RELEASE_SOURCE_BUILD = 81
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2272,18 +2272,8 @@ def test_package_log_delta_ui_contract() -> None:
         "#packageLogTableBody tr.package-log-row td {",
         "socket.on('package_log_db_status'",
         "function loadOlderPackageRows(",
-        "if (scrolledUp && container.scrollTop < packageRowHeight * 30) loadOlderPackageRows();",
-        "setPackageOlderStatus(packageOlderExhausted && packageHistoryPrefix.length ? 'Đã tới đầu session' : '', 2500);",
-        "if (text && autoHideMs > 0) packageOlderStatusTimer = setTimeout(() => setPackageOlderStatus(''), autoHideMs);",
+        "if (container.scrollTop < packageRowHeight * 30) loadOlderPackageRows();",
         "#packageLogTableBody tr.package-log-row { height: 18px; }",
-        "function clearPackageLiveSelection()",
-        'id="clearPackageFiltersBtn"',
-        "document.getElementById('clearPackageFiltersBtn')?.addEventListener('click', () => {",
-        "if (target.closest('button, input, select, textarea, label, a, [role=\"button\"], .resizer')) return;",
-        "if (filterChanged && selectedPackageRowKeys.size && revealSelectedPackageRow()) return;",
-        "function revealSelectedPackageRow()",
-        "window.addEventListener('blur', endPackageRowDrags);",
-        "if (e.buttons === 0) {",
         "let packageRowHeight = 18;",
         "function releasePackageHistoryPrefix(",
         'id="searchPackageSessionBtn"',

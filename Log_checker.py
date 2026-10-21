@@ -4644,7 +4644,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(80)</title>
+    <title>Event Inspector v2.5.0(81)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4740,7 +4740,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(80)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(81)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5485,7 +5485,6 @@ HTML_TEMPLATE = """
                         <label for="packageFilterInput3" class="block text-[11px] font-medium text-gray-700 mb-1">Filter 3:</label>
                         <input type="text" id="packageFilterInput3" class="w-full py-1.5 px-2 text-sm border rounded-md shadow-sm" placeholder="Search text 3...">
                     </div>
-                    <button id="clearPackageFiltersBtn" type="button" class="shrink-0 text-xs font-semibold py-2 px-3 rounded-md border border-gray-200 bg-gray-100 hover:bg-gray-200 text-gray-700" title="Clear Tag, Filter 1-3 and the quick filter">Clear filter</button>
                 </div>
             </div>
             <div id="packageDbWarning" class="hidden mb-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700"></div>
@@ -7737,16 +7736,11 @@ HTML_TEMPLATE = """
             }, 16);
         }
 
-        // Status badge for loading older rows.  Informational messages hide
-        // themselves so the badge never sits over the first log row.
-        var packageOlderStatusTimer = null;
-        function setPackageOlderStatus(text, autoHideMs = 0) {
+        function setPackageOlderStatus(text) {
             const el = document.getElementById('packageOlderStatus');
             if (!el) return;
-            clearTimeout(packageOlderStatusTimer);
             el.textContent = text || '';
             el.classList.toggle('hidden', !text);
-            if (text && autoHideMs > 0) packageOlderStatusTimer = setTimeout(() => setPackageOlderStatus(''), autoHideMs);
         }
 
         function releasePackageHistoryPrefix() {
@@ -7778,9 +7772,7 @@ HTML_TEMPLATE = """
                     const rows = (data.rows || []).filter(row => row.seq < beforeSeq);
                     if (!data.has_more) packageOlderExhausted = true;
                     if (!rows.length) {
-                        // Nothing older: only say so when older rows were
-                        // already loaded; otherwise the first row is in view.
-                        setPackageOlderStatus(packageOlderExhausted && packageHistoryPrefix.length ? 'Đã tới đầu session' : '', 2500);
+                        setPackageOlderStatus(packageOlderExhausted ? 'Đã tới đầu session' : '');
                         return;
                     }
                     packageHistoryPrefix = rows.concat(packageHistoryPrefix);
@@ -7798,53 +7790,27 @@ HTML_TEMPLATE = """
                     } else {
                         renderPackageLogTable(true);
                     }
-                    setPackageOlderStatus(`+${packageHistoryPrefix.length.toLocaleString()} dòng cũ từ lịch sử` + (packageOlderExhausted ? ' (đầu session)' : ''), 3000);
+                    setPackageOlderStatus(`+${packageHistoryPrefix.length.toLocaleString()} dòng cũ từ lịch sử` + (packageOlderExhausted ? ' (đầu session)' : ''));
                 })
-                .catch(err => setPackageOlderStatus(`Không tải được dòng cũ: ${err}`, 6000))
+                .catch(err => setPackageOlderStatus(`Không tải được dòng cũ: ${err}`))
                 .finally(() => { packageOlderLoading = false; });
         }
 
         function renderPackageLogTable(forceFull = false) {
             const state = getPackageFilterState();
             const signature = JSON.stringify(state);
-            const filterChanged = signature !== packageViewSignature;
-            if (forceFull || filterChanged) rebuildPackageView(state, signature);
-            if (filterChanged && selectedPackageRowKeys.size && revealSelectedPackageRow()) return;
+            if (forceFull || signature !== packageViewSignature) rebuildPackageView(state, signature);
             renderPackageViewport(forceFull);
         }
 
-        // After a filter change (Clear filter, All, typing), keep the selected
-        // row and scroll the new view so it sits in the middle.
-        function revealSelectedPackageRow() {
-            const container = document.getElementById('packageLogContainer');
-            if (!container) return false;
-            const idx = packageView.findIndex(row => selectedPackageRowKeys.has(getPackageRowKey(row)));
-            if (idx < 0) return false;
-            packageSelectionAnchor = idx;
-            packageStickToBottom = false;
-            renderPackageViewport(true);
-            const head = container.querySelector('thead');
-            const headHeight = head ? head.offsetHeight : 0;
-            container.scrollTop = Math.max(0, headHeight + idx * packageRowHeight - (container.clientHeight - headHeight) / 2);
-            packageLastScrollTop = container.scrollTop;
-            packageViewportDirty = true;
-            renderPackageViewport(true);
-            updatePackageNewRowsButton();
-            return true;
-        }
-
-        var packageLastScrollTop = 0;
         document.getElementById('packageLogContainer')?.addEventListener('scroll', () => {
             const container = document.getElementById('packageLogContainer');
-            const scrolledUp = container.scrollTop < packageLastScrollTop;
-            packageLastScrollTop = container.scrollTop;
             const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - packageRowHeight * 2;
             packageStickToBottom = atBottom;
             if (atBottom) packageNewRowsWhileAway = 0;
             updatePackageNewRowsButton();
             if (atBottom && packageAutoScrollEnabled()) releasePackageHistoryPrefix();
-            // Fetch older history only while the user scrolls up near the top.
-            if (scrolledUp && container.scrollTop < packageRowHeight * 30) loadOlderPackageRows();
+            if (container.scrollTop < packageRowHeight * 30) loadOlderPackageRows();
             schedulePackageViewportRender();
         }, { passive: true });
 
@@ -8705,16 +8671,6 @@ HTML_TEMPLATE = """
         document.getElementById('packageFilterInput').addEventListener('input', schedulePackageRender);
         document.getElementById('packageFilterInput2').addEventListener('input', schedulePackageRender);
         document.getElementById('packageFilterInput3').addEventListener('input', schedulePackageRender);
-        // One click empties every typed filter and goes back to the All quick filter.
-        document.getElementById('clearPackageFiltersBtn')?.addEventListener('click', () => {
-            ['packageTagFilterInput', 'packageFilterInput', 'packageFilterInput2', 'packageFilterInput3'].forEach(id => {
-                const input = document.getElementById(id);
-                if (input) input.value = '';
-            });
-            const allOpt = document.querySelector('input[name="tagQuickFilter"][value=""]');
-            if (allOpt) allOpt.checked = true;
-            renderPackageLogTable(true);
-        });
         document.getElementById('packageTagFilterInput').addEventListener('input', () => {
             const allOpt = document.querySelector('input[name="tagQuickFilter"][value=""]');
             if (allOpt) allOpt.checked = true;
@@ -8849,8 +8805,6 @@ HTML_TEMPLATE = """
             if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
                 document.activeElement.blur();
             }
-            // Drop a leftover browser text selection (e.g. from a double-click drag).
-            window.getSelection()?.removeAllRanges();
             isSelectingRows = true;
             const idx = parseInt(row.getAttribute('data-row-index') || '0', 10);
             if (e.shiftKey && packageSelectionAnchor !== null) {
@@ -8866,13 +8820,6 @@ HTML_TEMPLATE = """
 
         document.getElementById('packageLogTableBody').addEventListener('mouseover', (e) => {
             if (!isSelectingRows || dragStartIndex === null) return;
-            if (e.buttons === 0) {
-                // The button was released outside the window, so no mouseup
-                // reached us: stop the drag instead of following the pointer.
-                isSelectingRows = false;
-                dragStartIndex = null;
-                return;
-            }
             const row = e.target.closest('tr.package-log-row');
             if (!row) return;
             const idx = parseInt(row.getAttribute('data-row-index') || '0', 10);
@@ -8912,11 +8859,6 @@ HTML_TEMPLATE = """
 
         document.getElementById('packageHistoryTableBody').addEventListener('mouseover', (e) => {
             if (!isSelectingHistoryRows || historyDragStartIndex === null) return;
-            if (e.buttons === 0) {
-                isSelectingHistoryRows = false;
-                historyDragStartIndex = null;
-                return;
-            }
             const row = e.target.closest('tr.package-history-row');
             if (!row) return;
             const idx = parseInt(row.getAttribute('data-row-index') || '0', 10);
@@ -8934,44 +8876,11 @@ HTML_TEMPLATE = """
             openLogDetailModal(selected.length > 0 ? selected : [row]);
         });
 
-        function endPackageRowDrags() {
+        document.addEventListener('mouseup', () => {
             isSelectingRows = false;
             dragStartIndex = null;
             isSelectingHistoryRows = false;
             historyDragStartIndex = null;
-        }
-        document.addEventListener('mouseup', endPackageRowDrags);
-        window.addEventListener('blur', endPackageRowDrags);
-
-        // Only a click on empty space clears the selected rows (and any
-        // browser text selection in the log).  Buttons, inputs and quick
-        // filters keep the selection, so a row picked in a filtered view can
-        // be followed into the full log.
-        function clearPackageLiveSelection() {
-            endPackageRowDrags();
-            packageSelectionAnchor = null;
-            const sel = window.getSelection();
-            const body = document.getElementById('packageLogTableBody');
-            if (sel && sel.rangeCount && body && body.contains(sel.anchorNode)) sel.removeAllRanges();
-            if (!selectedPackageRowKeys.size) return;
-            selectedPackageRowKeys.clear();
-            document.querySelectorAll('#packageLogTableBody tr.package-log-row.selected').forEach(r => r.classList.remove('selected'));
-        }
-        document.addEventListener('mousedown', (e) => {
-            if (e.button !== 0) return;
-            const target = e.target;
-            if (target.closest('#logDetailModal, #packageQuickFilterEditor, #packageNewRowsBtn')) return;
-            const container = document.getElementById('packageLogContainer');
-            if (container && container.contains(target)) {
-                if (target.closest('tr.package-log-row, thead')) return;
-                // A click on the scrollbar lands outside the client area.
-                const rect = container.getBoundingClientRect();
-                if (e.clientX - rect.left >= container.clientWidth || e.clientY - rect.top >= container.clientHeight) return;
-                clearPackageLiveSelection();
-                return;
-            }
-            if (target.closest('button, input, select, textarea, label, a, [role="button"], .resizer')) return;
-            clearPackageLiveSelection();
         });
 
         // --- Ctrl+C to copy selected package log rows ---
