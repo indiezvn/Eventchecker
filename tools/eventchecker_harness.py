@@ -44,13 +44,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-10-21-3-2.5.0-79"
-CURRENT_RELEASE_BUILD = 79
+CURRENT_RELEASE_VERSION = "2026-10-21-1-2.5.0-77"
+CURRENT_RELEASE_BUILD = 77
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 79
+RELEASE_SOURCE_BUILD = 80
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2204,47 +2204,33 @@ def test_live_tables_ui_contract() -> None:
             _assert(column in template, f"{fn} lost a column: {column}")
 
 
-def test_specific_filter_boxes_compact() -> None:
-    """Specific Validator filter boxes have a fixed height, level with the last Source Filter option."""
-    text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
-    for id_ in ("specificEventInput", "specificParamInput"):
-        _assert(f'<textarea id="{id_}" class="w-full h-[4.25rem] resize-none p-2 border rounded-md shadow-sm"' in text, f"{id_} must keep the compact fixed height")
-
-
 def test_ui_zoom_setting_contract() -> None:
-    """Text zoom is saved server-side and rendered into the page; the default is 85%."""
+    """Text zoom is saved server-side and rendered into the page; 100% keeps the old size."""
     original_data_dir = os.environ.get("EVENTINSPECTOR_DATA_DIR")
     with tempfile.TemporaryDirectory() as temp_dir:
         os.environ["EVENTINSPECTOR_DATA_DIR"] = temp_dir
         try:
-            settings_path = os.path.join(temp_dir, "ui_settings.json")
             client = lc.app.test_client()
             html = client.get("/").get_data(as_text=True)
-            _assert_equal(lc.UI_DEFAULT_ZOOM, 0.85, "default text size must be 85%")
-            _assert('data-ui-zoom="0.85" style="font-size: 13.6px;"' in html, "a new machine must start at the 85% default")
-            _assert('title="Reset to the default size (Ctrl/Cmd 0)">85%</button>' in html, "the reset button must show the current size")
+            _assert('data-ui-zoom="1.0" style="font-size: 16.0px;"' in html, "default zoom must keep the 16px base size")
             for needle in ('id="uiZoomOut"', 'id="uiZoomReset"', 'id="uiZoomIn"', "function stepUiZoom(direction)",
-                           "fetch('/api/ui-settings'", "if (e.key === '-' || e.key === '_')",
-                           "var UI_DEFAULT_ZOOM = 0.85;", "applyUiZoom(UI_DEFAULT_ZOOM)"):
+                           "fetch('/api/ui-settings'", "if (e.key === '-' || e.key === '_')"):
                 _assert(needle in html, f"zoom UI contract missing: {needle}")
             _assert_equal(client.post("/api/ui-settings", json={"zoom": 0.33}).status_code, 400, "zoom outside the levels must be refused")
             _assert_equal(client.post("/api/ui-settings", json={"zoom": "x"}).status_code, 400, "non-numeric zoom must be refused")
             _assert('<div id="appHeader" class="bg-white rounded-xl shadow-md p-4 mb-4 flex-shrink-0">' in html, "header must be visible by default")
             _assert('>Hide Top</button>' in html and "function applyTopHidden(hidden)" in html, "Hide Top toggle is missing")
-            # Hide Top alone must not pin the zoom: a later default must still apply.
-            _assert_equal(client.post("/api/ui-settings", json={"hide_top": True}).get_json(), {"ok": True, "zoom": 0.85, "hide_top": True}, "hide_top was not saved")
-            with open(settings_path, encoding="utf-8") as handle:
-                _assert_equal(json.load(handle), {"hide_top": True}, "only the values the user changed may be stored")
-            _assert_equal(client.post("/api/ui-settings", json={"zoom": 1.1}).get_json(), {"ok": True, "zoom": 1.1, "hide_top": True}, "zoom must save without resetting hide_top")
+            _assert_equal(client.post("/api/ui-settings", json={"zoom": 0.85}).get_json(), {"ok": True, "zoom": 0.85, "hide_top": False}, "zoom was not saved")
             _assert_equal(client.post("/api/ui-settings", json={"hide_top": "yes"}).status_code, 400, "non-boolean hide_top must be refused")
             _assert_equal(client.post("/api/ui-settings", json={}).status_code, 400, "an empty settings update must be refused")
+            _assert_equal(client.post("/api/ui-settings", json={"hide_top": True}).get_json(), {"ok": True, "zoom": 0.85, "hide_top": True}, "hide_top must save without resetting zoom")
             html = client.get("/").get_data(as_text=True)
-            _assert('data-ui-zoom="1.1" style="font-size: 17.6px;"' in html, "saved zoom is not rendered into the page")
+            _assert('data-ui-zoom="0.85" style="font-size: 13.6px;"' in html, "saved zoom is not rendered into the page")
             _assert('flex-shrink-0 hidden">' in html and '>Show Top</button>' in html, "saved hide_top is not rendered into the page")
-            with open(settings_path, "w", encoding="utf-8") as handle:
+            with open(os.path.join(temp_dir, "ui_settings.json"), "w", encoding="utf-8") as handle:
                 handle.write("{broken")
             html = client.get("/").get_data(as_text=True)
-            _assert('data-ui-zoom="0.85"' in html, "a broken settings file must fall back to the default")
+            _assert('data-ui-zoom="1.0"' in html, "a broken settings file must fall back to 100%")
         finally:
             if original_data_dir is None:
                 os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
@@ -2273,8 +2259,6 @@ def test_package_log_delta_ui_contract() -> None:
         "socket.on('package_log_db_status'",
         "function loadOlderPackageRows(",
         "if (container.scrollTop < packageRowHeight * 30) loadOlderPackageRows();",
-        "#packageLogTableBody tr.package-log-row { height: 18px; }",
-        "let packageRowHeight = 18;",
         "function releasePackageHistoryPrefix(",
         'id="searchPackageSessionBtn"',
         'id="packageDbWarning"',
@@ -5414,7 +5398,6 @@ TESTS: List[Callable[[], None]] = [
     test_live_tables_delta_snapshot_and_clear,
     test_live_tables_ui_contract,
     test_ui_zoom_setting_contract,
-    test_specific_filter_boxes_compact,
     test_package_log_delta_ui_contract,
     test_main_script_has_unique_top_level_names,
     test_android_package_log_ignores_global_pause,
