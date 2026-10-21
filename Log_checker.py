@@ -7807,8 +7807,30 @@ HTML_TEMPLATE = """
         function renderPackageLogTable(forceFull = false) {
             const state = getPackageFilterState();
             const signature = JSON.stringify(state);
-            if (forceFull || signature !== packageViewSignature) rebuildPackageView(state, signature);
+            const filterChanged = signature !== packageViewSignature;
+            if (forceFull || filterChanged) rebuildPackageView(state, signature);
+            if (filterChanged && selectedPackageRowKeys.size && revealSelectedPackageRow()) return;
             renderPackageViewport(forceFull);
+        }
+
+        // After a filter change (Clear filter, All, typing), keep the selected
+        // row and scroll the new view so it sits in the middle.
+        function revealSelectedPackageRow() {
+            const container = document.getElementById('packageLogContainer');
+            if (!container) return false;
+            const idx = packageView.findIndex(row => selectedPackageRowKeys.has(getPackageRowKey(row)));
+            if (idx < 0) return false;
+            packageSelectionAnchor = idx;
+            packageStickToBottom = false;
+            renderPackageViewport(true);
+            const head = container.querySelector('thead');
+            const headHeight = head ? head.offsetHeight : 0;
+            container.scrollTop = Math.max(0, headHeight + idx * packageRowHeight - (container.clientHeight - headHeight) / 2);
+            packageLastScrollTop = container.scrollTop;
+            packageViewportDirty = true;
+            renderPackageViewport(true);
+            updatePackageNewRowsButton();
+            return true;
         }
 
         var packageLastScrollTop = 0;
@@ -8921,9 +8943,10 @@ HTML_TEMPLATE = """
         document.addEventListener('mouseup', endPackageRowDrags);
         window.addEventListener('blur', endPackageRowDrags);
 
-        // Clicking anywhere outside the live log (filters, buttons, quick
-        // filters, header) clears the selected rows and any browser text
-        // selection inside the log.
+        // Only a click on empty space clears the selected rows (and any
+        // browser text selection in the log).  Buttons, inputs and quick
+        // filters keep the selection, so a row picked in a filtered view can
+        // be followed into the full log.
         function clearPackageLiveSelection() {
             endPackageRowDrags();
             packageSelectionAnchor = null;
@@ -8935,7 +8958,19 @@ HTML_TEMPLATE = """
             document.querySelectorAll('#packageLogTableBody tr.package-log-row.selected').forEach(r => r.classList.remove('selected'));
         }
         document.addEventListener('mousedown', (e) => {
-            if (e.target.closest('#packageLogContainer, #packageNewRowsBtn, #logDetailModal')) return;
+            if (e.button !== 0) return;
+            const target = e.target;
+            if (target.closest('#logDetailModal, #packageQuickFilterEditor, #packageNewRowsBtn')) return;
+            const container = document.getElementById('packageLogContainer');
+            if (container && container.contains(target)) {
+                if (target.closest('tr.package-log-row, thead')) return;
+                // A click on the scrollbar lands outside the client area.
+                const rect = container.getBoundingClientRect();
+                if (e.clientX - rect.left >= container.clientWidth || e.clientY - rect.top >= container.clientHeight) return;
+                clearPackageLiveSelection();
+                return;
+            }
+            if (target.closest('button, input, select, textarea, label, a, [role="button"], .resizer')) return;
             clearPackageLiveSelection();
         });
 
