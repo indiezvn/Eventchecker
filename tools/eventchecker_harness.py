@@ -44,13 +44,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-10-20-3-2.5.0-76"
-CURRENT_RELEASE_BUILD = 76
+CURRENT_RELEASE_VERSION = "2026-10-21-1-2.5.0-77"
+CURRENT_RELEASE_BUILD = 77
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 76
+RELEASE_SOURCE_BUILD = 77
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
