@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 81
+RELEASE_SOURCE_BUILD = 82
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -1130,20 +1130,90 @@ def test_ios_discovery_grace_contract() -> None:
 
 
 def test_ios_reader_liveness_contract() -> None:
-    """Discovery churn is tolerated briefly, then stale iOS readers are removed."""
+    """A streaming iOS reader survives discovery misses; silent stale ones stop; stalled ones restart."""
     source = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
     manager = source.split("def device_manager():", 1)[1].split("def _append_package_log_row", 1)[0]
-    _assert("if is_dead and" in manager, "iOS readers must still restart after a real process/thread exit")
+    _assert("observed_ids = _observe_ios_device_ids()" in manager, "discovery must go through the throttled helper")
+    _assert("_ios_readers_to_stop(observed_ids, time.time())" in manager, "reader decisions must use the tested helper")
     _assert("did not in ids" not in manager, "iOS discovery must not stop a live reader on one missing row")
-    _assert("stale_reader_ids" in manager, "stale iOS reader tracking is missing")
     _assert("ids.difference_update(stale_reader_ids)" in manager, "stale iOS devices must be removed from the UI")
-    _assert("missing from discovery" in manager, "stale iOS readers must stop after discovery grace")
     _assert("set(active_ios_log_readers) - stale_reader_ids" in manager, "live iOS readers must stay visible during discovery grace")
     _assert("set(active_ios_log_processes) - stale_reader_ids" in manager, "live iOS processes must stay visible during discovery grace")
-    _assert(
-        "an idle stream must not be killed" in manager,
-        "iOS reader idle-stream protection is missing",
-    )
+    _assert('env=dict(os.environ, PYTHONUNBUFFERED="1")' in source, "tidevice output must be unbuffered")
+
+    class FakeProc:
+        def __init__(self, code=None):
+            self.code = code
+
+        def poll(self):
+            return self.code
+
+    class FakeThread:
+        def __init__(self, alive=True):
+            self.alive = alive
+
+        def is_alive(self):
+            return self.alive
+
+    state_names = ("active_ios_log_readers", "active_ios_log_processes", "active_ios_log_started_at", "active_ios_log_last_seen", "ios_device_missing_polls")
+    saved = {name: dict(getattr(lc, name)) for name in state_names}
+    saved_cache = dict(lc.ios_discovery_cache)
+    saved_list = lc._list_ios_device_ids
+    now = 10_000.0
+    try:
+        for name in state_names:
+            getattr(lc, name).clear()
+
+        def reader(did, started, last_seen, proc_code=None, alive=True, misses=0):
+            lc.active_ios_log_readers[did] = FakeThread(alive)
+            lc.active_ios_log_processes[did] = FakeProc(proc_code)
+            lc.active_ios_log_started_at[did] = started
+            lc.active_ios_log_last_seen[did] = last_seen
+            if misses:
+                lc.ios_device_missing_polls[did] = misses
+
+        grace = lc.IOS_DEVICE_MISSING_GRACE_POLLS + 1
+        reader("streaming-missing", now - 600, now - 2, misses=grace)    # discovery lost it, logs still flowing
+        reader("silent-missing", now - 600, now - 60, misses=grace)      # unplugged: no logs, not discovered
+        reader("stalled", now - 600, now - 45)                           # connected but silent 45 s
+        reader("quiet", now - 600, now - 12)                             # short quiet period
+        reader("just-started", now - 5, now - 5)                         # still warming up
+        reader("dead", now - 600, now - 1, proc_code=1)                  # process exited
+        lc.active_ios_log_processes["orphan"] = FakeProc(None)           # process without a reader thread
+        observed = {"stalled", "quiet", "just-started", "dead", "orphan"}
+        with lc.lock:
+            stops, stale = lc._ios_readers_to_stop(observed, now)
+        reasons = {did: reason for did, reason in stops}
+        _assert_equal(stale, {"silent-missing"}, "only the silent, undiscovered reader is stale")
+        _assert("streaming-missing" not in reasons, "a reader still receiving logs must survive discovery misses")
+        _assert_equal(reasons.get("silent-missing"), "missing from discovery", "an unplugged silent reader must stop")
+        _assert(str(reasons.get("stalled", "")).startswith("stalled: no logs for 45s"), f"a stuck reader must restart: {reasons}")
+        _assert("quiet" not in reasons and "just-started" not in reasons, "short quiet periods must not restart a reader")
+        _assert_equal(reasons.get("dead"), "dead", "an exited reader must restart")
+        _assert_equal(reasons.get("orphan"), "orphan process", "an orphan process must stop")
+
+        # Discovery is skipped while every reader streams, and runs again when one goes quiet.
+        for name in state_names:
+            getattr(lc, name).clear()
+        calls = []
+        lc._list_ios_device_ids = lambda: calls.append(1) or ["phone"]
+        lc.ios_discovery_cache.update(at=0.0, ids=set())
+        reader("phone", now - 600, now - 1)
+        _assert_equal(lc._observe_ios_device_ids(now), {"phone"}, "first discovery must run")
+        _assert_equal(lc._observe_ios_device_ids(now + 5), {"phone"}, "cached discovery result is wrong")
+        _assert_equal(len(calls), 1, "discovery must be skipped while the reader streams")
+        _assert_equal(lc._observe_ios_device_ids(now + lc.IOS_DISCOVERY_SLOW_INTERVAL_SECONDS + 1), {"phone"}, "slow discovery result is wrong")
+        _assert_equal(len(calls), 2, "discovery must still run every IOS_DISCOVERY_SLOW_INTERVAL_SECONDS")
+        lc.active_ios_log_last_seen["phone"] = now - 30
+        lc._observe_ios_device_ids(now + lc.IOS_DISCOVERY_SLOW_INTERVAL_SECONDS + 2)
+        _assert_equal(len(calls), 3, "discovery must run right away when a reader goes quiet")
+    finally:
+        lc._list_ios_device_ids = saved_list
+        lc.ios_discovery_cache.clear()
+        lc.ios_discovery_cache.update(saved_cache)
+        for name in state_names:
+            getattr(lc, name).clear()
+            getattr(lc, name).update(saved[name])
 
 
 def test_android_logcat_reconnect_cursor_contract() -> None:
@@ -2202,6 +2272,14 @@ def test_live_tables_ui_contract() -> None:
         template = html.split(fn, 1)[1].split("\n        }", 1)[0]
         for column in columns:
             _assert(column in template, f"{fn} lost a column: {column}")
+
+
+def test_sdk_check_results_text_size() -> None:
+    """SDK Check results use the same small text as the other result tables."""
+    text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
+    _assert('<pre class="font-mono ${sizeClass} leading-5" style="margin: 0; white-space: pre-wrap;">' in text, "SDK Check rows must have an explicit small text size")
+    _assert("const sizeClass = res.status === 'LABEL' ? 'text-sm' : 'text-xs';" in text, "SDK Check label/row sizes changed")
+    _assert('<pre style="font-family: monospace; margin: 0;' not in text, "unsized monospace <pre> is back in SDK Check")
 
 
 def test_specific_filter_boxes_compact() -> None:
@@ -5506,6 +5584,7 @@ TESTS: List[Callable[[], None]] = [
     test_live_tables_ui_contract,
     test_ui_zoom_setting_contract,
     test_specific_filter_boxes_compact,
+    test_sdk_check_results_text_size,
     test_package_log_delta_ui_contract,
     test_main_script_has_unique_top_level_names,
     test_android_package_log_ignores_global_pause,

@@ -1578,6 +1578,17 @@ incomplete_android_event_logs = {} # Buffer cho TrackingService event JSON bị 
 adb_error_counter = 0
 IOS_LOG_STALL_TIMEOUT_SECONDS = 60
 IOS_DEVICE_MISSING_GRACE_POLLS = 2
+# A reader that delivered data this recently is never stopped just because
+# device discovery missed the phone (usbmux on Windows often returns an
+# empty list for a moment while the syslog stream keeps working).
+IOS_LOG_HEALTHY_SECONDS = 20
+# iOS syslog is chatty (~170 lines/s measured), so an alive reader with no
+# data for this long while the phone is still connected is stuck: restart it.
+IOS_LOG_STALL_RESTART_SECONDS = 30
+# While every reader is healthy, run `tidevice list` only this often instead
+# of every pass, to keep fewer usbmux connections open at the same time.
+IOS_DISCOVERY_SLOW_INTERVAL_SECONDS = 15
+ios_discovery_cache = {"at": 0.0, "ids": set()}
 
 
 def _get_package_db_connection():
@@ -2542,6 +2553,74 @@ def _list_ios_device_ids():
             seen.add(device_id)
             unique_ids.append(device_id)
     return unique_ids
+
+
+def _ios_reader_recently_active(device_id, now, window=IOS_LOG_HEALTHY_SECONDS):
+    """True when the reader process is alive and delivered data within `window` seconds."""
+    proc = active_ios_log_processes.get(device_id)
+    last_seen = active_ios_log_last_seen.get(device_id)
+    if proc is None or proc.poll() is not None or not last_seen:
+        return False
+    return now - last_seen < window
+
+
+def _observe_ios_device_ids(now=None):
+    """Device discovery, skipped (cached) while every reader is streaming."""
+    now = time.time() if now is None else now
+    with lock:
+        readers = set(active_ios_log_readers)
+        healthy = bool(readers) and all(_ios_reader_recently_active(did, now, window=10) for did in readers)
+        cached = set(ios_discovery_cache["ids"])
+        fresh = now - ios_discovery_cache["at"] < IOS_DISCOVERY_SLOW_INTERVAL_SECONDS
+    if healthy and fresh and readers <= cached:
+        return cached
+    ids = set(_list_ios_device_ids())
+    with lock:
+        ios_discovery_cache["at"] = now
+        ios_discovery_cache["ids"] = set(ids)
+    return ids
+
+
+def _ios_readers_to_stop(observed_ids, now):
+    """Decide which iOS readers to stop. Call under `lock`.
+
+    Returns (readers_to_stop as [(device_id, reason)], stale_reader_ids).
+    - dead: the thread or process exited;
+    - missing from discovery: absent beyond the grace polls AND no data for
+      IOS_LOG_HEALTHY_SECONDS (a streaming reader survives discovery misses);
+    - stalled: the phone is still connected but the alive reader sent nothing
+      for IOS_LOG_STALL_RESTART_SECONDS; the device manager starts a new one.
+    """
+    readers_to_stop = []
+    active_reader_ids = set(active_ios_log_readers) | set(active_ios_log_processes)
+    stale_reader_ids = {
+        did for did in (active_reader_ids - observed_ids)
+        if ios_device_missing_polls.get(did, 0) > IOS_DEVICE_MISSING_GRACE_POLLS
+        and not _ios_reader_recently_active(did, now)
+    }
+    for did in sorted(stale_reader_ids):
+        readers_to_stop.append((did, 'missing from discovery'))
+    # A reader can disappear from the thread map while its process is still
+    # alive. Treat that process as orphaned; otherwise the next pass may
+    # start a second stream for the same device and duplicate the old buffer.
+    for did in sorted(set(active_ios_log_processes) - set(active_ios_log_readers)):
+        if did not in stale_reader_ids:
+            readers_to_stop.append((did, 'orphan process'))
+    for did in list(active_ios_log_readers.keys()):
+        if did in stale_reader_ids:
+            continue
+        proc = active_ios_log_processes.get(did)
+        thread = active_ios_log_readers.get(did)
+        started_at = active_ios_log_started_at.get(did, now)
+        last_seen = active_ios_log_last_seen.get(did, started_at)
+        is_dead = (thread and not thread.is_alive()) or (proc and proc.poll() is not None)
+        if is_dead:
+            readers_to_stop.append((did, 'dead'))
+        elif (proc is not None and did in observed_ids
+              and now - started_at >= IOS_LOG_STALL_RESTART_SECONDS
+              and now - last_seen >= IOS_LOG_STALL_RESTART_SECONDS):
+            readers_to_stop.append((did, f'stalled: no logs for {int(now - last_seen)}s'))
+    return readers_to_stop, stale_reader_ids
 
 
 def _stabilize_ios_device_ids(observed_ids, known_ids):
@@ -4648,7 +4727,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(81)</title>
+    <title>Event Inspector v2.5.0(82)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4744,7 +4823,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(81)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(82)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -7520,15 +7599,18 @@ HTML_TEMPLATE = """
                  else if (res.status === 'FAILED') statusText = '<span class="font-semibold text-red-600"> - FAILED</span>';
                  else if (res.status === 'NOT_FOUND') statusText = '<span class="font-semibold text-red-600"> - Not Found</span>';
                  else if (res.status === 'FOUND') statusText = '<span class="font-semibold text-amber-600"> - FOUND</span>';
-                 else if (res.status === 'HEADER') rowClass += ' font-semibold text-sm text-indigo-600 bg-gray-50';
-                 else if (res.status === 'LABEL') rowClass += ' font-bold text-base text-indigo-700 pt-3';
-                 else if (res.status === 'SECTION') rowClass += ' font-bold text-sm text-slate-500 pt-4 border-t border-gray-200';
-                 else if (res.status === 'WAITING') rowClass += ' text-sm text-gray-500 italic';
+                 else if (res.status === 'HEADER') rowClass += ' font-semibold text-indigo-600 bg-gray-50';
+                 else if (res.status === 'LABEL') rowClass += ' font-bold text-indigo-700 pt-3';
+                 else if (res.status === 'SECTION') rowClass += ' font-bold text-slate-500 pt-4 border-t border-gray-200';
+                 else if (res.status === 'WAITING') rowClass += ' text-gray-500 italic';
+                 // Same text size as the other result tables (and it follows the zoom):
+                 // an unsized <pre> fell back to the browser's larger monospace size.
+                 const sizeClass = res.status === 'LABEL' ? 'text-sm' : 'text-xs';
                  
                  // Filter
                  if (selectedDevice !== 'all' && res.device_id !== selectedDevice && res.status !== 'LABEL' && res.status !== 'SECTION' && res.status !== 'WAITING') return '';
                  
-                 return `<tr><td class="py-1 px-4 ${rowClass}"><pre style="font-family: monospace; margin: 0; white-space: pre-wrap;">${escapeHTML(res.display_text)}${statusText}</pre></td></tr>`;
+                 return `<tr><td class="py-1 px-4 ${rowClass}"><pre class="font-mono ${sizeClass} leading-5" style="margin: 0; white-space: pre-wrap;">${escapeHTML(res.display_text)}${statusText}</pre></td></tr>`;
             }).join('');
         });
 
@@ -12932,6 +13014,9 @@ def ios_log_reader(device_id):
             encoding='utf-8',
             errors='ignore',
             creationflags=creation_flags,
+            # tidevice is a Python program: keep its pipe output unbuffered so
+            # lines arrive as they are logged instead of in bursts.
+            env=dict(os.environ, PYTHONUNBUFFERED="1"),
         )
         with lock:
             active_ios_log_processes[device_id] = proc
@@ -13036,7 +13121,7 @@ def device_manager():
         generation = platform_generation
         try:
             if platform == "ios":
-                observed_ids = set(_list_ios_device_ids())
+                observed_ids = _observe_ios_device_ids()
                 readers_to_stop = []
                 stale_reader_ids = set()
                 with lock:
@@ -13049,41 +13134,13 @@ def device_manager():
                         if device.get("id")
                     )
                     ids = _stabilize_ios_device_ids(observed_ids, known_ids)
-                    # A live reader survives short discovery churn, but a
-                    # reader whose device has been absent beyond the grace
-                    # window is stale and must be stopped/removed. Otherwise
-                    # a hung tidevice process keeps a disconnected device in
-                    # the UI indefinitely.
-                    active_reader_ids = set(active_ios_log_readers) | set(active_ios_log_processes)
-                    stale_reader_ids = {
-                        did for did in (active_reader_ids - observed_ids)
-                        if ios_device_missing_polls.get(did, 0) > IOS_DEVICE_MISSING_GRACE_POLLS
-                    }
-                    for did in sorted(stale_reader_ids):
-                        readers_to_stop.append((did, 'missing from discovery'))
-                    # A reader can disappear from the thread map while its
-                    # tidevice process is still alive. Treat that process as
-                    # orphaned; otherwise the next discovery pass may start a
-                    # second stream for the same device and duplicate the
-                    # whole old syslog buffer.
-                    for did in sorted(set(active_ios_log_processes) - set(active_ios_log_readers)):
-                        if did not in stale_reader_ids:
-                            readers_to_stop.append((did, 'orphan process'))
+                    # A streaming reader survives discovery misses; a reader
+                    # gone from discovery and silent is stale; an alive but
+                    # silent reader of a connected phone is restarted.
+                    readers_to_stop, stale_reader_ids = _ios_readers_to_stop(observed_ids, time.time())
                     ids.difference_update(stale_reader_ids)
                     ids.update(set(active_ios_log_readers) - stale_reader_ids)
                     ids.update(set(active_ios_log_processes) - stale_reader_ids)
-                    now = time.time()
-                    for did in list(active_ios_log_readers.keys()):
-                        proc = active_ios_log_processes.get(did)
-                        thread = active_ios_log_readers.get(did)
-                        started_at = active_ios_log_started_at.get(did, now)
-                        last_seen = active_ios_log_last_seen.get(did, started_at)
-                        is_dead = (thread and not thread.is_alive()) or (proc and proc.poll() is not None)
-                        # an idle stream must not be killed while discovery
-                        # still reports the device; a real process/thread
-                        # exit is separate from a false stalled connection.
-                        if is_dead and did not in stale_reader_ids:
-                            readers_to_stop.append((did, 'dead'))
 
                 for did, reason in readers_to_stop:
                     print(f"WARNING: Stopping iOS log reader for {did} ({reason})")
