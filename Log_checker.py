@@ -1328,9 +1328,6 @@ recording_states = {
 
 # 3. Dữ liệu cho Tab Validator
 validator_results = deque(maxlen=MAX_VALIDATOR_LOGS)
-# Validator rows not yet sent to the UI, and the per-row counter.
-validator_pending = []
-validator_seq = 0
 required_params = []  # Manual extra params from UI
 default_params = []   # Default params from sheet (apply to all events)
 event_specific_params = {}  # event_name -> list of params
@@ -1352,11 +1349,6 @@ default_ad_event_clients = set()
 # 4. Dữ liệu cho Tab Specific Event
 event_log_cache = deque(maxlen=MAX_SPECIFIC_EVENT_LOGS)
 specific_event_results = []
-# Specific Validator rows not yet sent to the UI, and the per-event counter.
-specific_event_pending = []
-specific_event_seq = 0
-# Live tables send new rows at most this often (coalesced deltas).
-TABLE_DELTA_INTERVAL_SECONDS = 0.25
 specific_event_name_filters = []
 specific_event_params_filters = []
 
@@ -1418,30 +1410,11 @@ callback_ad_logs = deque(maxlen=MAX_CALLBACK_AD_LOGS)
 # 7. Dữ liệu cho Tab AdRevenue
 adrevenue_log_cache = []
 adrevenue_logs = deque(maxlen=MAX_ADREVENUE_LOGS)
-# Rendered Revenue rows (mirrors adrevenue_logs), rows not yet sent, counter.
-adrevenue_rendered = []
-adrevenue_pending = []
-adrevenue_seq = 0
 adrevenue_default_params = []
 adrevenue_source_params = {}
 
 # 8. Dữ liệu cho Tab Price Rotation
 price_rotation_logs = deque(maxlen=MAX_PRICE_ROTATION_LOGS)
-# Live tables that send new rows as coalesced deltas (see _live_table_append).
-LIVE_TABLE_ROWS = {
-    "load_ads": load_ads_events,
-    "load_ads_ext": load_ads_ext_events,
-    "callback": callback_ad_logs,
-    "price_rotation": price_rotation_logs,
-}
-LIVE_TABLE_DELTA_EVENTS = {
-    "load_ads": "load_ads_delta",
-    "load_ads_ext": "load_ads_ext_delta",
-    "callback": "callback_ad_delta",
-    "price_rotation": "price_rotation_delta",
-}
-LIVE_TABLE_PENDING = {name: [] for name in LIVE_TABLE_ROWS}
-live_table_seq = 0
 PRICE_ROTATION_PREFIX = "[Ad,RewardedBidding"
 PRICE_ROTATION_PREFIXES = (
     ("Rewarded", "[Ad,RewardedBidding"),
@@ -1563,8 +1536,9 @@ def _append_callback_ad_row(row):
             row.get("event_name", ""),
         ):
             return False
-        _live_table_append("callback", row)
-        snapshot = True
+        callback_ad_logs.append(row)
+        snapshot = list(callback_ad_logs)
+    socketio.emit("update_callback_ad_table", snapshot)
     return True
 
 
@@ -3610,8 +3584,9 @@ def process_price_rotation_log(log_entry, device_id):
             parsed.get("type", ""),
         ):
             return
-        _live_table_append("price_rotation", parsed)
-        snapshot = True
+        price_rotation_logs.append(parsed)
+        snapshot = list(price_rotation_logs)
+    socketio.emit("update_price_rotation_table", snapshot)
 
 def _decode_ios_levelplay_json_text(text):
     # iOS syslog sometimes writes \" as \134", which is not valid JSON.
@@ -4600,7 +4575,7 @@ def _profile_payload():
 def _emit_profile_runtime_refresh():
     """Re-render every tab that derives results from the active profile."""
     with lock:
-        validator_results.clear(); validator_pending.clear()
+        validator_results.clear()
         _clear_record_dedup("validator")
     _apply_specific_filter_and_emit()
     _apply_adrevenue_filter_and_emit()
@@ -4639,12 +4614,12 @@ def _levenshtein_distance_limit(a, b, limit=2):
 # --- GIAO DIỆN WEB (HTML/JS) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="vi" data-ui-zoom="{{ ui_zoom }}" style="font-size: {{ ui_zoom_px }}px;">
+<html lang="vi">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(77)</title>
+    <title>Event Inspector v2.5.0(78)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4732,24 +4707,19 @@ HTML_TEMPLATE = """
 
     <div class="container mx-auto p-3 sm:p-4 lg:p-6 h-full flex flex-col">
         <!-- HEADER -->
-        <div id="appHeader" class="bg-white rounded-xl shadow-md p-4 mb-4 flex-shrink-0{% if ui_hide_top %} hidden{% endif %}">
+        <div class="bg-white rounded-xl shadow-md p-4 mb-4 flex-shrink-0">
             <div class="flex justify-between items-center flex-wrap gap-4">
                 <div class="flex items-center gap-3">
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(77)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(78)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
                     <div class="flex items-center gap-2">
                     <button id="restartAppBtn" class="bg-blue-500 hover:bg-blue-600 text-white text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm">Check Update</button>
                     <button id="manualRestartBtn" class="bg-slate-500 hover:bg-slate-600 text-white text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm">Restart</button>
-                    <div id="uiZoomControls" class="flex items-center border border-slate-300 rounded-lg overflow-hidden shadow-sm bg-white text-slate-700 text-sm font-semibold" title="Text size (Ctrl/Cmd − / = / 0)">
-                        <button id="uiZoomOut" type="button" class="px-2.5 py-2 hover:bg-slate-100" title="Smaller text (Ctrl/Cmd −)">A−</button>
-                        <button id="uiZoomReset" type="button" class="px-2 py-2 border-x border-slate-300 hover:bg-slate-100 min-w-[3.5rem]" title="Reset to 100% (Ctrl/Cmd 0)">100%</button>
-                        <button id="uiZoomIn" type="button" class="px-2.5 py-2 hover:bg-slate-100" title="Larger text (Ctrl/Cmd =)">A+</button>
-                    </div>
                     <button id="platformBtn" class="bg-white hover:bg-gray-50 text-slate-700 border border-slate-300 text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm">Platform: Android</button>
                     <div id="installationIdPanel" class="min-w-[300px] max-w-[420px] bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 shadow-sm">
                         <div class="flex items-start justify-between gap-3">
@@ -4813,7 +4783,6 @@ HTML_TEMPLATE = """
                     <button id="tabBtnPackage" class="tab-btn text-sm font-semibold py-2 px-4 -mb-px border-b-2 border-transparent" onclick="switchTab('Package')">Package Logcat</button>
                     <button id="tabBtnServicesChecker" class="tab-btn text-sm font-semibold py-2 px-4 -mb-px border-b-2 border-transparent" onclick="switchTab('ServicesChecker')">Services Checker</button>
                 </div>
-                <button id="toggleTopBtn" type="button" class="shrink-0 mb-1 ml-2 text-xs font-semibold py-1.5 px-3 rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 shadow-sm" title="Hide or show the top bar to give the tables more room">{% if ui_hide_top %}Show Top{% else %}Hide Top{% endif %}</button>
             </div>
         </div>
 
@@ -5367,7 +5336,7 @@ HTML_TEMPLATE = """
     </div>
 
     <div id="packageHistoryModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 hidden">
-        <div class="bg-white shadow-lg p-4 w-screen h-screen flex flex-col">
+        <div class="bg-white rounded-xl shadow-lg p-6 w-[88vw] h-[82vh] flex flex-col">
             <div class="flex justify-between items-start border-b pb-3 mb-4">
                 <div class="flex items-center gap-3 flex-wrap">
                     <h2 class="text-xl font-bold text-gray-800">Recorded Package Logs</h2>
@@ -5380,7 +5349,7 @@ HTML_TEMPLATE = """
                 <button id="closePackageHistoryModal" class="text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
             </div>
             <div class="flex flex-col gap-4">
-                <div class="grid grid-cols-1 xl:grid-cols-[260px_110px_110px_150px_1fr_1fr_1fr_1fr] gap-3 items-end">
+                <div class="grid grid-cols-1 xl:grid-cols-[340px_160px_160px_1fr_1fr_1fr] gap-4 items-end">
                     <div>
                         <label for="packageHistorySessionSelect" class="block text-[11px] font-medium text-gray-700 mb-1">Saved Sessions:</label>
                         <select id="packageHistorySessionSelect" class="w-full p-2 text-[11px] border rounded-md shadow-sm"></select>
@@ -5394,10 +5363,6 @@ HTML_TEMPLATE = """
                         <button id="clearPackageHistoryFiltersBtn" class="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200 font-semibold text-xs py-2 px-4 rounded-lg h-9">Clear Filter</button>
                     </div>
                     <div>
-                        <label for="packageHistoryQuickFilter" class="block text-[11px] font-medium text-gray-700 mb-1">Quick Filter:</label>
-                        <select id="packageHistoryQuickFilter" class="w-full p-2 text-[11px] border rounded-md shadow-sm h-9"><option value="">All</option></select>
-                    </div>
-                    <div>
                         <label for="packageHistoryFilterInput3" class="block text-[11px] font-medium text-gray-700 mb-1">Tag Filter:</label>
                         <input type="text" id="packageHistoryFilterInput3" class="w-full p-2 text-[11px] border rounded-md shadow-sm" placeholder="Search saved log tag...">
                     </div>
@@ -5408,10 +5373,6 @@ HTML_TEMPLATE = """
                     <div>
                         <label for="packageHistoryFilterInput2" class="block text-[11px] font-medium text-gray-700 mb-1">Filter 2:</label>
                         <input type="text" id="packageHistoryFilterInput2" class="w-full p-2 text-[11px] border rounded-md shadow-sm" placeholder="Search saved log text 2...">
-                    </div>
-                    <div>
-                        <label for="packageHistoryFilterInput4" class="block text-[11px] font-medium text-gray-700 mb-1">Filter 3:</label>
-                        <input type="text" id="packageHistoryFilterInput4" class="w-full p-2 text-[11px] border rounded-md shadow-sm" placeholder="Search saved log text 3...">
                     </div>
                 </div>
                 <p id="packageHistoryMeta" class="text-[11px] text-gray-500">No session selected.</p>
@@ -5438,64 +5399,75 @@ HTML_TEMPLATE = """
     </div>
 
     <div id="packageStreamModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 hidden">
-        <div class="bg-white shadow-lg p-4 w-screen h-screen flex flex-col">
-            <div class="border-b pb-2 mb-2">
-                <div class="flex flex-wrap items-center gap-x-10 gap-y-1 mb-2">
-                    <h2 class="text-xl font-bold text-gray-800">Package Log Stream</h2>
-                    <div class="flex items-center gap-2">
-                        <label for="packageStreamProjectSelect" class="text-xs font-semibold text-gray-700">Project:</label>
-                        <select id="packageStreamProjectSelect" class="py-1 px-2 text-xs border rounded-md shadow-sm min-w-[240px] max-w-[360px]" title="Switch project: saves the current session and starts capturing the selected project"></select>
-                    </div>
-                    <div class="flex flex-wrap items-center gap-4">
-                        <label class="inline-flex items-center gap-2">
-                            <input id="showErrorsOnly" type="checkbox" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
-                            <span class="block text-xs text-gray-900">Show errors only</span>
-                        </label>
-                        <label class="inline-flex items-center gap-2">
-                            <input id="showWarningsOnly" type="checkbox" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
-                            <span class="block text-xs text-gray-900">Show only Warning</span>
-                        </label>
-                        <label class="inline-flex items-center gap-2">
-                            <input id="autoScroll" type="checkbox" checked class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
-                            <span class="block text-xs text-gray-900">Auto-scroll</span>
-                        </label>
-                    </div>
-                </div>
-                <div class="flex flex-wrap items-end gap-x-3 gap-y-2">
-                    <div class="flex items-center gap-3 shrink-0 mr-3">
-                        <button id="pausePackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-amber-500 hover:bg-amber-600 text-white">Pause</button>
-                        <button id="stopPackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-red-500 hover:bg-red-600 text-white">Stop</button>
-                        <button id="searchPackageSessionBtn" type="button" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-slate-600 hover:bg-slate-700 text-white" title="Search every row of this session in saved history (Filter 1-3, Tag and quick filters)">Tìm toàn session</button>
-                    </div>
-                    <div class="w-44">
+        <div class="bg-white rounded-xl shadow-lg p-6 w-[94vw] h-[88vh] flex flex-col">
+            <div class="border-b pb-3 mb-4">
+                <div class="grid grid-cols-1 xl:grid-cols-[420px_1fr_420px] gap-6 items-start">
+                    <div class="min-w-0">
+                        <h2 class="text-xl font-bold text-gray-800 mb-4">Package Log Stream</h2>
                         <label for="packageTagFilterInput" class="block text-[11px] font-medium text-gray-700 mb-1">Tag Filter:</label>
-                        <input type="text" id="packageTagFilterInput" class="w-full py-1.5 px-2 text-sm border rounded-md shadow-sm" placeholder="Tag...">
+                        <input type="text" id="packageTagFilterInput" class="w-full p-2 border rounded-md shadow-sm" placeholder="Tag...">
+                        <div class="flex items-center gap-3 mt-4">
+                            <button id="pausePackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-amber-500 hover:bg-amber-600 text-white">Pause</button>
+                            <button id="stopPackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-red-500 hover:bg-red-600 text-white">Stop</button>
+                            <button id="searchPackageSessionBtn" type="button" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-slate-600 hover:bg-slate-700 text-white" title="Search every row of this session in saved history (Message 1, Message 2 and Tag filters)">Tìm toàn session</button>
+                        </div>
                     </div>
-                    <div class="w-56">
-                        <label for="packageFilterInput" class="block text-[11px] font-medium text-gray-700 mb-1">Filter 1:</label>
-                        <input type="text" id="packageFilterInput" class="w-full py-1.5 px-2 text-sm border rounded-md shadow-sm" placeholder="Search text 1...">
+                    <div class="min-w-0">
+                        <div class="flex flex-wrap items-center gap-4 mb-4">
+                            <label class="inline-flex items-center gap-2">
+                                <input id="showErrorsOnly" type="checkbox" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
+                                <span class="block text-xs text-gray-900">Show errors only</span>
+                            </label>
+                            <label class="inline-flex items-center gap-2">
+                                <input id="showWarningsOnly" type="checkbox" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
+                                <span class="block text-xs text-gray-900">Show only Warning</span>
+                            </label>
+                            <label class="inline-flex items-center gap-2">
+                                <input id="autoScroll" type="checkbox" checked class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
+                                <span class="block text-xs text-gray-900">Auto-scroll</span>
+                            </label>
+                        </div>
+                        <div class="pt-4 border-t flex items-start justify-start gap-32 text-xs text-gray-700">
+                            <div class="grid grid-cols-1 gap-y-2">
+                                <label class="inline-flex items-center gap-2">
+                                    <input type="radio" name="tagQuickFilter" value="" checked class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                    <span>All</span>
+                                </label>
+                                <label class="inline-flex items-center gap-2">
+                                    <input type="radio" name="tagQuickFilter" value="integrationhelper" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                    <span>Integrationhelper</span>
+                                </label>
+                                <label class="inline-flex items-center gap-2">
+                                    <input type="radio" name="tagQuickFilter" value="appsflyer" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                    <span>Appsflyer</span>
+                                </label>
+                                <label class="inline-flex items-center gap-2">
+                                    <input type="radio" name="tagQuickFilter" value="appmetrica" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                    <span>Appmetrica</span>
+                                </label>
+                                <label class="inline-flex items-center gap-2">
+                                    <input type="radio" name="tagQuickFilter" value="adjust" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                    <span>Adjust</span>
+                                </label>
+                            </div>
+                            <label class="inline-flex items-center gap-2 shrink-0 pt-0.5">
+                                <input type="radio" name="tagQuickFilter" value="rewarded_bidding" data-android-only="true" data-message-needle="[Ad,RewardedBidding" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                <span>RewardedBidding</span>
+                            </label>
+                        </div>
                     </div>
-                    <div class="w-56">
-                        <label for="packageFilterInput2" class="block text-[11px] font-medium text-gray-700 mb-1">Filter 2:</label>
-                        <input type="text" id="packageFilterInput2" class="w-full py-1.5 px-2 text-sm border rounded-md shadow-sm" placeholder="Search text 2...">
-                    </div>
-                    <div class="w-56">
-                        <label for="packageFilterInput3" class="block text-[11px] font-medium text-gray-700 mb-1">Filter 3:</label>
-                        <input type="text" id="packageFilterInput3" class="w-full py-1.5 px-2 text-sm border rounded-md shadow-sm" placeholder="Search text 3...">
+                    <div class="min-w-0">
+                        <label for="packageFilterInput" class="block text-[11px] font-medium text-gray-700 mb-1">Message Filter 1:</label>
+                        <input type="text" id="packageFilterInput" class="w-full p-2 border rounded-md shadow-sm" placeholder="Search text 1...">
+                        <div class="mt-3">
+                            <label for="packageFilterInput2" class="block text-[11px] font-medium text-gray-700 mb-1">Message Filter 2:</label>
+                            <input type="text" id="packageFilterInput2" class="w-full p-2 border rounded-md shadow-sm" placeholder="Search text 2...">
+                        </div>
                     </div>
                 </div>
             </div>
             <div id="packageDbWarning" class="hidden mb-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700"></div>
-            <div class="flex-1 flex gap-3" style="min-height: 0;">
-                <div id="packageQuickFilterPanel" class="w-40 shrink-0 overflow-y-auto border-r pr-2 pt-1 flex flex-col gap-y-2 text-xs text-gray-700">
-                    <label class="inline-flex items-center gap-2">
-                        <input type="radio" name="tagQuickFilter" value="" checked class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
-                        <span>All</span>
-                    </label>
-                    <div id="packageQuickFilterList" class="flex flex-col gap-y-2"></div>
-                    <button id="editPackageQuickFiltersBtn" type="button" class="self-start mt-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 hover:underline">Edit filters…</button>
-                </div>
-            <div class="relative flex-1 flex flex-col min-w-0" style="min-height: 0;">
+            <div class="relative flex-1 flex flex-col" style="min-height: 0;">
             <div id="packageOlderStatus" class="hidden absolute left-4 top-9 z-20 rounded bg-slate-700 px-2 py-1 text-[11px] text-white shadow"></div>
             <button id="packageNewRowsBtn" type="button" class="hidden bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold py-1.5 px-3 rounded-full shadow">New rows</button>
             <div id="packageLogContainer" class="overflow-auto flex-1 border rounded-md" style="min-height: 0;">
@@ -5510,48 +5482,6 @@ HTML_TEMPLATE = """
                     <tbody id="packageLogTableBody"></tbody>
                 </table>
             </div>
-            </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="packageQuickFilterEditor" class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 hidden" style="z-index: 70;">
-        <div class="bg-white rounded-xl shadow-lg p-5 w-[min(1000px,96vw)] max-h-[90vh] flex flex-col">
-            <div class="flex justify-between items-start gap-4 border-b pb-3 mb-3">
-                <div>
-                    <h2 class="text-lg font-bold text-gray-800">Quick Filters – <span id="packageQuickFilterEditorPlatform">Android</span></h2>
-                    <p class="text-[11px] text-gray-500 mt-1">Mỗi ô giống ô lọc tương ứng phía trên: Tag tìm trong tag, Filter 1 / 2 / 3 tìm trên toàn bộ dòng log. Dòng log phải khớp tất cả ô đã điền, ô trống thì bỏ qua. Android và iOS có danh sách riêng, lưu trên máy này, không ảnh hưởng preset.</p>
-                </div>
-                <button id="closePackageQuickFilterEditor" type="button" class="text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
-            </div>
-            <div class="overflow-auto flex-1 border rounded-md" style="min-height: 0;">
-                <table class="min-w-full bg-white text-xs">
-                    <thead class="bg-gray-50 sticky top-0 z-10">
-                        <tr>
-                            <th class="text-left font-semibold text-gray-600 py-2 px-2 border-b">Name</th>
-                            <th class="qf-tag-col text-left font-semibold text-gray-600 py-2 px-2 border-b">Tag</th>
-                            <th class="text-left font-semibold text-gray-600 py-2 px-2 border-b">Filter 1</th>
-                            <th class="text-left font-semibold text-gray-600 py-2 px-2 border-b">Filter 2</th>
-                            <th class="text-left font-semibold text-gray-600 py-2 px-2 border-b">Filter 3</th>
-                            <th class="py-2 px-2 border-b"></th>
-                        </tr>
-                    </thead>
-                    <tbody id="packageQuickFilterEditorBody"></tbody>
-                </table>
-            </div>
-            <p id="packageQuickFilterEditorError" class="hidden mt-2 text-xs font-semibold text-red-600"></p>
-            <div class="flex flex-wrap justify-between gap-2 mt-3">
-                <div class="flex gap-2">
-                    <button id="addPackageQuickFilterBtn" type="button" class="text-xs font-semibold py-2 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white">+ Add filter</button>
-                    <button id="resetPackageQuickFiltersBtn" type="button" class="text-xs font-semibold py-2 px-3 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200">Reset to defaults</button>
-                    <button id="exportPackageQuickFiltersBtn" type="button" class="text-xs font-semibold py-2 px-3 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200" title="Save this list to a .json file (backup or share)">Export</button>
-                    <button id="importPackageQuickFiltersBtn" type="button" class="text-xs font-semibold py-2 px-3 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200" title="Load a list from an exported .json file (replaces this list after Save)">Import</button>
-                    <input type="file" id="packageQuickFilterImportInput" accept=".json,application/json" class="hidden">
-                </div>
-                <div class="flex gap-2">
-                    <button id="cancelPackageQuickFilterEditor" type="button" class="text-xs font-semibold py-2 px-3 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200">Cancel</button>
-                    <button id="savePackageQuickFiltersBtn" type="button" class="text-xs font-semibold py-2 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white">Save</button>
-                </div>
             </div>
         </div>
     </div>
@@ -5577,333 +5507,6 @@ HTML_TEMPLATE = """
             ? window.io()
             : { on() { return this; }, emit() { return this; } };
         let currentTab = 'LoadAdsExt';
-        // --- UI zoom (text size) ---
-        // Scales the root font size, so every rem-based size (Tailwind text,
-        // padding, gaps) follows; the level is saved on the server because the
-        // desktop webview does not keep localStorage between launches.
-        var UI_ZOOM_LEVELS = [0.7, 0.75, 0.8, 0.85, 0.9, 1, 1.1, 1.25, 1.4];
-        var currentUiZoom = Number(document.documentElement.dataset.uiZoom) || 1;
-        var uiZoomSaveTimer = null;
-        function renderUiZoomLabel() {
-            const label = document.getElementById('uiZoomReset');
-            if (label) label.textContent = `${Math.round(currentUiZoom * 100)}%`;
-        }
-        function applyUiZoom(level) {
-            currentUiZoom = level;
-            document.documentElement.style.fontSize = `${16 * level}px`;
-            document.documentElement.dataset.uiZoom = String(level);
-            renderUiZoomLabel();
-            if (typeof schedulePackageViewportRender === 'function') schedulePackageViewportRender();
-            clearTimeout(uiZoomSaveTimer);
-            uiZoomSaveTimer = setTimeout(() => {
-                fetch('/api/ui-settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ zoom: level }),
-                }).catch(() => {});
-            }, 300);
-        }
-        function stepUiZoom(direction) {
-            let index = UI_ZOOM_LEVELS.indexOf(currentUiZoom);
-            if (index < 0) index = UI_ZOOM_LEVELS.indexOf(1);
-            index = Math.max(0, Math.min(UI_ZOOM_LEVELS.length - 1, index + direction));
-            applyUiZoom(UI_ZOOM_LEVELS[index]);
-        }
-        document.getElementById('uiZoomOut')?.addEventListener('click', () => stepUiZoom(-1));
-        document.getElementById('uiZoomIn')?.addEventListener('click', () => stepUiZoom(1));
-        document.getElementById('uiZoomReset')?.addEventListener('click', () => applyUiZoom(1));
-        document.addEventListener('keydown', (e) => {
-            if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-            if (e.key === '-' || e.key === '_') { e.preventDefault(); stepUiZoom(-1); }
-            else if (e.key === '=' || e.key === '+') { e.preventDefault(); stepUiZoom(1); }
-            else if (e.key === '0') { e.preventDefault(); applyUiZoom(1); }
-        });
-        renderUiZoomLabel();
-
-        // Hide Top / Show Top: collapses the header card to give the tables more
-        // room; saved on the server like the zoom level.
-        function applyTopHidden(hidden) {
-            document.getElementById('appHeader')?.classList.toggle('hidden', hidden);
-            const btn = document.getElementById('toggleTopBtn');
-            if (btn) btn.textContent = hidden ? 'Show Top' : 'Hide Top';
-            if (typeof schedulePackageViewportRender === 'function') schedulePackageViewportRender();
-            fetch('/api/ui-settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ hide_top: hidden }),
-            }).catch(() => {});
-        }
-        document.getElementById('toggleTopBtn')?.addEventListener('click', () => {
-            applyTopHidden(!document.getElementById('appHeader')?.classList.contains('hidden'));
-        });
-
-        // --- Package Log quick filters ---
-        // User-editable lists saved per platform on this machine
-        // (package_quick_filters_<platform>.json, not preset data).  A filter
-        // works like the boxes above the table: Tag (Android only) must be in
-        // the tag; Message 1 and Message 2 must each be in the whole log line.
-        var packageQuickFilters = {{ package_quick_filters|tojson }};
-        var packageQuickFilterDefaults = {{ package_quick_filter_defaults|tojson }};
-        var packageQuickFilterDraft = [];
-        var packageQuickFilterEditorPlatform = 'android';
-        function qfEsc(value) {
-            return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-        }
-        function quickFilterPlatform() {
-            return activePlatform === 'ios' ? 'ios' : 'android';
-        }
-        function availableQuickFilters() {
-            return (packageQuickFilters && packageQuickFilters[quickFilterPlatform()]) || [];
-        }
-        function resolveQuickFilter(id) {
-            if (!id) return null;
-            const item = availableQuickFilters().find(f => f.id === id);
-            if (!item) return null;
-            // Matching is never case sensitive.
-            const norm = text => String(text || '').trim().toLowerCase();
-            const tag = quickFilterPlatform() === 'ios' ? '' : norm(item.tag);
-            const terms = [norm(item.message1), norm(item.message2), norm(item.message3)].filter(Boolean);
-            if (!tag && !terms.length) return null;
-            return { tag, terms };
-        }
-        function quickFilterTitle(item) {
-            const parts = [];
-            if (item.tag && quickFilterPlatform() !== 'ios') parts.push(`Tag: ${item.tag}`);
-            if (item.message1) parts.push(`Filter 1: ${item.message1}`);
-            if (item.message2) parts.push(`Filter 2: ${item.message2}`);
-            if (item.message3) parts.push(`Filter 3: ${item.message3}`);
-            return parts.join(' · ');
-        }
-        function renderPackageQuickFilters() {
-            const list = document.getElementById('packageQuickFilterList');
-            if (!list) return;
-            const checked = document.querySelector('input[name="tagQuickFilter"]:checked')?.value || '';
-            const items = availableQuickFilters();
-            list.innerHTML = items.map(f => `<label class="inline-flex items-center gap-2 min-w-0" title="${qfEsc(quickFilterTitle(f))}"><input type="radio" name="tagQuickFilter" value="${qfEsc(f.id)}" class="h-4 w-4 shrink-0 text-indigo-600 border-gray-300 focus:ring-indigo-500"><span class="truncate">${qfEsc(f.name)}</span></label>`).join('');
-            const keep = items.some(f => f.id === checked) ? checked : '';
-            const radio = Array.from(document.querySelectorAll('input[name="tagQuickFilter"]')).find(r => r.value === keep);
-            if (radio) radio.checked = true;
-            renderHistoryQuickFilterOptions();
-        }
-        function renderHistoryQuickFilterOptions() {
-            const select = document.getElementById('packageHistoryQuickFilter');
-            if (!select) return;
-            const current = select.value;
-            const items = availableQuickFilters();
-            select.innerHTML = '<option value="">All</option>' + items.map(f => `<option value="${qfEsc(f.id)}">${qfEsc(f.name)}</option>`).join('');
-            select.value = items.some(f => f.id === current) ? current : '';
-        }
-
-        function renderQuickFilterEditor() {
-            const body = document.getElementById('packageQuickFilterEditorBody');
-            if (!body) return;
-            const isIos = packageQuickFilterEditorPlatform === 'ios';
-            document.querySelectorAll('.qf-tag-col').forEach(el => el.classList.toggle('hidden', isIos));
-            const title = document.getElementById('packageQuickFilterEditorPlatform');
-            if (title) title.textContent = isIos ? 'iOS' : 'Android';
-            if (!packageQuickFilterDraft.length) {
-                body.innerHTML = '<tr><td colspan="7" class="py-6 text-center text-gray-400">No filters. Add one or reset to defaults.</td></tr>';
-                return;
-            }
-            const input = 'w-full p-1.5 border rounded-md';
-            const last = packageQuickFilterDraft.length - 1;
-            body.innerHTML = packageQuickFilterDraft.map((f, i) => `<tr class="border-b align-middle">
-                <td class="p-1.5 w-44"><input data-i="${i}" data-field="name" value="${qfEsc(f.name)}" maxlength="40" class="${input}"></td>
-                <td class="p-1.5${isIos ? ' hidden' : ''}"><input data-i="${i}" data-field="tag" value="${qfEsc(f.tag)}" maxlength="200" placeholder="Tag..." class="${input} font-mono"></td>
-                <td class="p-1.5"><input data-i="${i}" data-field="message1" value="${qfEsc(f.message1)}" maxlength="200" placeholder="Search text 1..." class="${input} font-mono"></td>
-                <td class="p-1.5"><input data-i="${i}" data-field="message2" value="${qfEsc(f.message2)}" maxlength="200" placeholder="Search text 2..." class="${input} font-mono"></td>
-                <td class="p-1.5"><input data-i="${i}" data-field="message3" value="${qfEsc(f.message3)}" maxlength="200" placeholder="Search text 3..." class="${input} font-mono"></td>
-                <td class="p-1.5 whitespace-nowrap text-right">
-                    <button type="button" data-i="${i}" data-action="up" class="px-2 py-1 rounded hover:bg-gray-100 disabled:opacity-30" title="Move up"${i === 0 ? ' disabled' : ''}>↑</button>
-                    <button type="button" data-i="${i}" data-action="down" class="px-2 py-1 rounded hover:bg-gray-100 disabled:opacity-30" title="Move down"${i === last ? ' disabled' : ''}>↓</button>
-                    <button type="button" data-i="${i}" data-action="delete" class="px-2 py-1 rounded text-red-600 hover:bg-red-50" title="Delete">✕</button>
-                </td></tr>`).join('');
-        }
-        function showQuickFilterEditorError(message, isInfo = false) {
-            const el = document.getElementById('packageQuickFilterEditorError');
-            if (!el) return;
-            el.textContent = message || '';
-            el.classList.toggle('hidden', !message);
-            el.classList.toggle('text-red-600', !isInfo);
-            el.classList.toggle('text-emerald-700', isInfo);
-        }
-        function openQuickFilterEditor() {
-            packageQuickFilterEditorPlatform = quickFilterPlatform();
-            packageQuickFilterDraft = availableQuickFilters().map(f => ({ ...f }));
-            showQuickFilterEditorError('');
-            renderQuickFilterEditor();
-            document.getElementById('packageQuickFilterEditor')?.classList.remove('hidden');
-        }
-        function closeQuickFilterEditor() {
-            document.getElementById('packageQuickFilterEditor')?.classList.add('hidden');
-        }
-        function saveQuickFilterEditor() {
-            const platform = packageQuickFilterEditorPlatform;
-            const filters = packageQuickFilterDraft.map(f => ({ ...f, tag: platform === 'ios' ? '' : String(f.tag || '').trim() }));
-            for (let i = 0; i < filters.length; i++) {
-                const f = filters[i];
-                if (!String(f.name || '').trim()) return showQuickFilterEditorError(`Row ${i + 1}: name is empty.`);
-                if (![f.tag, f.message1, f.message2, f.message3].some(v => String(v || '').trim())) {
-                    return showQuickFilterEditorError(`Row ${i + 1} (${f.name}): fill at least one filter box.`);
-                }
-            }
-            showQuickFilterEditorError('');
-            fetch('/api/package-quick-filters', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ platform, filters }),
-            })
-                .then(r => r.json())
-                .then(data => {
-                    if (!data.ok) throw new Error(data.error || 'save_failed');
-                    packageQuickFilters[platform] = data.filters || [];
-                    renderPackageQuickFilters();
-                    if (typeof renderPackageLogTable === 'function') renderPackageLogTable(true);
-                    closeQuickFilterEditor();
-                })
-                .catch(err => showQuickFilterEditorError(`Could not save: ${err.message || err}`));
-        }
-        document.getElementById('editPackageQuickFiltersBtn')?.addEventListener('click', openQuickFilterEditor);
-        document.getElementById('closePackageQuickFilterEditor')?.addEventListener('click', closeQuickFilterEditor);
-        document.getElementById('cancelPackageQuickFilterEditor')?.addEventListener('click', closeQuickFilterEditor);
-        document.getElementById('savePackageQuickFiltersBtn')?.addEventListener('click', saveQuickFilterEditor);
-        document.getElementById('addPackageQuickFilterBtn')?.addEventListener('click', () => {
-            const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-            packageQuickFilterDraft.push({ id, name: 'New filter', tag: '', message1: '', message2: '', message3: '' });
-            renderQuickFilterEditor();
-            const inputs = document.querySelectorAll('#packageQuickFilterEditorBody input[data-field="name"]');
-            inputs[inputs.length - 1]?.select();
-        });
-        document.getElementById('resetPackageQuickFiltersBtn')?.addEventListener('click', () => {
-            packageQuickFilterDraft = ((packageQuickFilterDefaults || {})[packageQuickFilterEditorPlatform] || []).map(f => ({ ...f }));
-            showQuickFilterEditorError('');
-            renderQuickFilterEditor();
-        });
-        // In the desktop app the server opens the native Save dialog; in a
-        // browser the page asks for a location itself (save picker, or a
-        // normal download where the picker is not available).
-        var packageNativeFileDialog = {{ 'true' if native_file_dialog else 'false' }};
-        async function exportQuickFilters() {
-            const platform = packageQuickFilterEditorPlatform;
-            const filters = packageQuickFilterDraft.map(f => ({ ...f, tag: platform === 'ios' ? '' : f.tag }));
-            const post = (extra) => fetch('/api/package-quick-filters/export', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ platform, filters, ...extra }),
-            }).then(r => r.json()).then(data => {
-                if (!data.ok && !data.cancelled) throw new Error(data.error || 'export_failed');
-                return data;
-            });
-            try {
-                if (packageNativeFileDialog) {
-                    const data = await post({});
-                    if (!data.cancelled) showQuickFilterEditorError(`Exported ${data.count} filters to ${data.path}`, true);
-                    return;
-                }
-                const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_');
-                const suggestedName = `quick_filters_${platform}_${stamp}.json`;
-                let handle = null;
-                if (typeof window.showSaveFilePicker === 'function') {
-                    // Ask for the location first, while the click still counts as a user action.
-                    try {
-                        handle = await window.showSaveFilePicker({
-                            suggestedName,
-                            types: [{ description: 'JSON file', accept: { 'application/json': ['.json'] } }],
-                        });
-                    } catch (err) {
-                        if (err && err.name === 'AbortError') return;
-                        handle = null;
-                    }
-                }
-                const data = await post({ download: true });
-                if (handle) {
-                    const writable = await handle.createWritable();
-                    await writable.write(data.content);
-                    await writable.close();
-                    showQuickFilterEditorError(`Exported ${data.count} filters to ${handle.name}`, true);
-                    return;
-                }
-                const url = URL.createObjectURL(new Blob([data.content], { type: 'application/json' }));
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = suggestedName;
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-                setTimeout(() => URL.revokeObjectURL(url), 1000);
-                showQuickFilterEditorError(`Exported ${data.count} filters as ${suggestedName} (browser download).`, true);
-            } catch (err) {
-                showQuickFilterEditorError(`Could not export: ${err.message || err}`);
-            }
-        }
-        function importQuickFilters(file) {
-            if (!file) return;
-            const platform = packageQuickFilterEditorPlatform;
-            const reader = new FileReader();
-            reader.onload = () => {
-                let data;
-                try {
-                    data = JSON.parse(String(reader.result || ''));
-                } catch (err) {
-                    showQuickFilterEditorError('Could not import: the file is not valid JSON.');
-                    return;
-                }
-                fetch('/api/package-quick-filters/import', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ platform, data }),
-                })
-                    .then(r => r.json())
-                    .then(result => {
-                        if (!result.ok) {
-                            if (result.error === 'wrong_platform') {
-                                throw new Error(`this file is for ${result.file_platform === 'ios' ? 'iOS' : 'Android'}; open the filters of that platform to import it`);
-                            }
-                            throw new Error(result.error || 'import_failed');
-                        }
-                        packageQuickFilterDraft = (result.filters || []).map(f => ({ ...f }));
-                        renderQuickFilterEditor();
-                        showQuickFilterEditorError(`Imported ${packageQuickFilterDraft.length} filters from ${file.name}. Press Save to replace the current list.`, true);
-                    })
-                    .catch(err => showQuickFilterEditorError(`Could not import: ${err.message || err}`));
-            };
-            reader.onerror = () => showQuickFilterEditorError('Could not read the file.');
-            reader.readAsText(file);
-        }
-        document.getElementById('exportPackageQuickFiltersBtn')?.addEventListener('click', exportQuickFilters);
-        document.getElementById('importPackageQuickFiltersBtn')?.addEventListener('click', () => {
-            const input = document.getElementById('packageQuickFilterImportInput');
-            if (!input) return;
-            input.value = '';
-            input.click();
-        });
-        document.getElementById('packageQuickFilterImportInput')?.addEventListener('change', (e) => {
-            importQuickFilters(e.target.files && e.target.files[0]);
-        });
-        (function bindQuickFilterEditorBody() {
-            const body = document.getElementById('packageQuickFilterEditorBody');
-            if (!body) return;
-            const update = (e) => {
-                const el = e.target;
-                const i = Number(el.dataset.i);
-                const field = el.dataset.field;
-                if (!field || !packageQuickFilterDraft[i]) return;
-                packageQuickFilterDraft[i][field] = el.value;
-            };
-            body.addEventListener('input', update);
-            body.addEventListener('change', update);
-            body.addEventListener('click', (e) => {
-                const btn = e.target.closest('button[data-action]');
-                if (!btn) return;
-                const i = Number(btn.dataset.i);
-                const list = packageQuickFilterDraft;
-                if (btn.dataset.action === 'delete') list.splice(i, 1);
-                else if (btn.dataset.action === 'up' && i > 0) [list[i - 1], list[i]] = [list[i], list[i - 1]];
-                else if (btn.dataset.action === 'down' && i < list.length - 1) [list[i + 1], list[i]] = [list[i], list[i + 1]];
-                renderQuickFilterEditor();
-            });
-        })();
-
         let selectedDevice = 'all';
 
         // --- Common Elements ---
@@ -5925,7 +5528,6 @@ HTML_TEMPLATE = """
         const installationIdValueEl = document.getElementById('installationIdValue');
         const copyInstallationIdBtn = document.getElementById('copyInstallationIdBtn');
         let activePlatform = localStorage.getItem('eventInspectorPlatform') || '';
-        renderPackageQuickFilters();
         let sdkCheckPresets = {{ sdk_check_presets | tojson }};
         let brightSkadLastPayload = null;
         // Keep SDK Check state declarations above the platform/bootstrap code.
@@ -6063,9 +5665,18 @@ HTML_TEMPLATE = """
                 packageTagInput.classList.toggle('text-gray-400', isIos);
                 if (isIos) packageTagInput.value = '';
             }
-            // Quick filters depend on the platform (keywords per platform; iOS
-            // has no tag).
-            renderPackageQuickFilters();
+            document.querySelectorAll('input[name="tagQuickFilter"]').forEach(radio => {
+                const isIos = platform === 'ios';
+                radio.disabled = isIos;
+                const label = radio.closest('label');
+                const isAndroidOnly = radio.dataset.androidOnly === 'true' || radio.dataset.messageNeedle;
+                if (label) {
+                    label.classList.toggle('opacity-50', isIos);
+                    label.classList.toggle('hidden', Boolean(isAndroidOnly && isIos));
+                }
+                if (isIos && radio.value === '') radio.checked = true;
+                if (isIos && isAndroidOnly) radio.checked = false;
+            });
         }
 
         function resetSdkCheckUiState(clearInput = false) {
@@ -6230,13 +5841,6 @@ HTML_TEMPLATE = """
             if (btnEl) btnEl.classList.add('active');
 
             if (tabName === 'SdkCheck' || tabName === 'BrightSDK') loadSdkCheckPresetsFromGit();
-            if (tabName === 'Specific' && specificLive) specificLive.onTabShown();
-            if (tabName === 'Validator' && validatorLive) validatorLive.onTabShown();
-            if (tabName === 'AdRevenue' && adRevenueLive) adRevenueLive.onTabShown();
-            if (tabName === 'CallbackAd' && callbackLive) callbackLive.onTabShown();
-            if (tabName === 'PriceRotation' && priceRotationLive) priceRotationLive.onTabShown();
-            if (tabName === 'LoadAds' && loadAdsLive) loadAdsLive.onTabShown();
-            if (tabName === 'LoadAdsExt' && loadAdsExtLive) loadAdsExtLive.onTabShown();
             if (tabName === 'ServicesChecker') openServicesChecker();
             if (['Validator', 'DefaultAdEvents', 'Specific', 'AdRevenue'].includes(tabName)) {
                 // The profile is shared by all validation/revenue tabs. Sync
@@ -6434,43 +6038,6 @@ HTML_TEMPLATE = """
                 </tr>
             `).join('');
         }
-
-        // Load Ads / Load Ads Ext as live tables.  The row and placeholder
-        // templates below are the ones renderSimpleTable uses, so the HTML of a
-        // full render and of appended rows is identical.
-        let lastLoadAdsData = [];
-        let lastLoadAdsExtData = [];
-        function simpleTableRowHtml(id) {
-            const useProvider = id === 'loadAdsTableBody' || id === 'loadAdsExtTableBody';
-            const useAdNetwork = id === 'loadAdsExtTableBody';
-            return e => `
-                <tr class="hover:bg-gray-50 border-b text-sm">
-                    <td class="py-2 px-2 text-purple-700 text-sm font-medium whitespace-nowrap">${escapeHTML(e.device_name || '')}</td>
-                    ${useProvider ? `<td class="py-2 px-2 text-orange-600 text-sm font-medium whitespace-nowrap">${escapeHTML(e.provider || (useAdNetwork ? 'Unknown' : ''))}</td>` : ''}
-                    <td class="py-2 px-2 text-blue-600 text-sm font-medium whitespace-nowrap">${escapeHTML(useAdNetwork ? (e.ad_network || e.ad_source || '') : (e.ad_source || e.ad_network || ''))}</td>
-                    <td class="py-2 px-2 text-green-600 text-sm font-medium whitespace-nowrap">${escapeHTML(e.ad_format || '')}</td>
-                    <td class="py-2 px-3 log-cell text-xs font-normal text-gray-600">${escapeHTML(e.raw_log || '')}</td>
-                </tr>
-            `;
-        }
-        function simpleTableEmptyHtml(id) {
-            const useProvider = id === 'loadAdsTableBody' || id === 'loadAdsExtTableBody';
-            const columnCount = useProvider ? 5 : 4;
-            return `<tr><td colspan="${columnCount}" class="text-center py-4 text-gray-400">Waiting for recording...</td></tr>`;
-        }
-        function simpleTableLive(id, tabContentId, getRows, setRows) {
-            return createLiveTable({
-                tbodyId: id,
-                tabContentId,
-                emptyHtml: () => simpleTableEmptyHtml(id),
-                getRows,
-                setRows,
-                rowHtml: simpleTableRowHtml(id),
-                makeFilter: () => (e => selectedDevice === 'all' || e.device_id === selectedDevice),
-            });
-        }
-        var loadAdsLive = simpleTableLive('loadAdsTableBody', 'tabContentLoadAds', () => lastLoadAdsData, rows => { lastLoadAdsData = rows; });
-        var loadAdsExtLive = simpleTableLive('loadAdsExtTableBody', 'tabContentLoadAdsExt', () => lastLoadAdsExtData, rows => { lastLoadAdsExtData = rows; });
 
         let validator_results_cache = [];
         let defaultEventNames = {{ default_event_names | tojson }};
@@ -6861,27 +6428,40 @@ HTML_TEMPLATE = """
             Object.entries(statusMap).forEach(([name, status]) => {
                 const el = defaultEventStatusEls[name];
                 if (!el) return;
-                // Write only real changes: rewriting an unchanged icon still
-                // forces the browser to lay out the whole page again.
-                const setIcon = (text, className, title) => {
-                    if (el.textContent !== text) el.textContent = text;
-                    if (el.className !== className) el.className = className;
-                    if (el.title !== title) el.title = title;
-                };
                 if (status === 'passed') {
-                    setIcon('✓', 'event-status-icon text-green-600 font-bold', 'PASSED');
+                    el.textContent = '✓';
+                    el.className = 'event-status-icon text-green-600 font-bold';
+                    el.title = 'PASSED';
                 } else if (status === 'failed') {
-                    setIcon('✕', 'event-status-icon text-red-600 font-bold', 'FAILED');
+                    el.textContent = '✕';
+                    el.className = 'event-status-icon text-red-600 font-bold';
+                    el.title = 'FAILED';
                 } else {
-                    setIcon('...', 'event-status-icon text-gray-400 font-bold', 'checking');
+                    el.textContent = '...';
+                    el.className = 'event-status-icon text-gray-400 font-bold';
+                    el.title = 'checking';
                 }
             });
         }
 
-        // One row of the Validator table.  Full renders and appended rows use
-        // this same template, so both paths produce identical HTML.
-        function validatorRowHtml(res) {
-             return `
+        function renderValidatorTable(results) {
+             const tbody = document.getElementById('validatorTableBody');
+             if (!tbody) return;
+             const filterText = (document.getElementById('validatorEventFilterInput')?.value || '').toLowerCase().trim();
+             const rawFilterText = (document.getElementById('validatorRawFilterInput')?.value || '').toLowerCase().trim();
+             const sourceFilter = document.querySelector('input[name="validatorSourceFilter"]:checked')?.value || 'all';
+             const filtered = dedupeLogRecords(results).filter(r => {
+                 if (selectedDevice !== 'all' && r.device_id !== selectedDevice) return false;
+                 if (filterText && !(r.event_name || '').toLowerCase().includes(filterText)) return false;
+                 if (rawFilterText && !(r.raw_log || '').toLowerCase().includes(rawFilterText)) return false;
+                 if (sourceFilter !== 'all' && (r.source || 'firebase') !== sourceFilter) return false;
+                 return true;
+             });
+             
+             if (filtered.length === 0) {
+                 tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4">Waiting...</td></tr>';
+             } else {
+                 tbody.innerHTML = filtered.map(res => `
                     <tr class="hover:bg-gray-50 border-b text-sm">
                         <td class="py-2 px-3 text-purple-700 text-sm">${res.device_name}</td>
                         <td class="py-2 px-3 text-sm font-semibold ${res.status === 'PASSED' ? 'text-green-600' : 'text-red-600'}">${res.status}</td>
@@ -6890,32 +6470,8 @@ HTML_TEMPLATE = """
                         <td class="py-2 px-3 log-cell text-xs font-normal text-gray-600">${escapeHTML(res.raw_log || '')}</td>
                         <td class="py-2 px-3"><button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(res.json_data)}'>View JSON</button></td>
                     </tr>
-                 `;
-        }
-
-        function validatorRowVisible(r) {
-             const filterText = (document.getElementById('validatorEventFilterInput')?.value || '').toLowerCase().trim();
-             const rawFilterText = (document.getElementById('validatorRawFilterInput')?.value || '').toLowerCase().trim();
-             const sourceFilter = document.querySelector('input[name="validatorSourceFilter"]:checked')?.value || 'all';
-                              if (selectedDevice !== 'all' && r.device_id !== selectedDevice) return false;
-                 if (filterText && !(r.event_name || '').toLowerCase().includes(filterText)) return false;
-                 if (rawFilterText && !(r.raw_log || '').toLowerCase().includes(rawFilterText)) return false;
-                 if (sourceFilter !== 'all' && (r.source || 'firebase') !== sourceFilter) return false;
-                 return true;
-        }
-
-        var validatorLive = createLiveTable({
-             tbodyId: 'validatorTableBody',
-             tabContentId: 'tabContentValidator',
-             emptyHtml: '<tr><td colspan="6" class="text-center py-4">Waiting...</td></tr>',
-             getRows: () => validator_results_cache,
-             setRows: rows => { validator_results_cache = rows; },
-             rowHtml: validatorRowHtml,
-             visible: validatorRowVisible,
-        });
-
-        function renderValidatorTable(results) {
-             validatorLive.renderFull(results);
+                 `).join('');
+             }
         }
 
         renderDefaultAdEventMatrix();
@@ -7087,16 +6643,11 @@ HTML_TEMPLATE = """
         });
 
         // --- Socket Listeners (Renderers) ---
-        socket.on('update_load_ads', (d) => { lastLoadAdsData = dedupeLogRecords(d); loadAdsLive.setAll(lastLoadAdsData); });
-        socket.on('update_load_ads_ext', (d) => { lastLoadAdsExtData = dedupeLogRecords(d); loadAdsExtLive.setAll(lastLoadAdsExtData); });
-        socket.on('load_ads_delta', (payload) => loadAdsLive.applyDelta(payload));
-        socket.on('load_ads_ext_delta', (payload) => loadAdsExtLive.applyDelta(payload));
-        socket.on('validator_delta', (payload) => {
-            if (validatorLive.applyDelta(payload)) updateDefaultEventStatus(validator_results_cache);
-        });
+        socket.on('update_load_ads', (d) => renderSimpleTable('loadAdsTableBody', d));
+        socket.on('update_load_ads_ext', (d) => renderSimpleTable('loadAdsExtTableBody', d));
         socket.on('update_validator_table', (d) => {
             validator_results_cache = d || [];
-            validatorLive.setAll(validator_results_cache);
+            renderValidatorTable(validator_results_cache);
             updateDefaultEventStatus(validator_results_cache);
         });
 
@@ -7111,200 +6662,49 @@ HTML_TEMPLATE = """
 
         let lastSpecificEventData = [];
 
-        // --- Shared live-table updater (Specific Validator, Validator) ---
-        // New rows arrive as server deltas.  The table appends them with the
-        // same row template a full render uses, so the HTML is identical to a
-        // full rebuild.  A hidden tab only records that it must render later.
-        // A large visible table is patched at most once per second: with
-        // auto table layout every patch re-lays out the whole table.
-        var LIVE_TABLE_LARGE_ROWS = 300;
-        var LIVE_TABLE_LARGE_INTERVAL_MS = 1000;
-        function createLiveTable(opts) {
-            const state = {
-                lastSeq: 0,
-                renderedCount: 0,
-                needsRender: false,
-                pendingAppend: [],
-                pendingRemove: 0,
-                flushTimer: null,
-                lastFlushAt: 0,
-                leadWs: null,
-            };
-            const seqOf = r => Number(r && r.seq) || 0;
-            function tabVisible() {
-                const el = document.getElementById(opts.tabContentId);
-                return !!el && !el.classList.contains('hidden');
-            }
-            // Leading whitespace of one rendered row (multi-line templates
-            // start with a newline).  Kept so a patched table serialises
-            // byte-for-byte like a fresh full render.
-            function leadingWhitespace(row) {
-                const html = opts.rowHtml(row);
-                let i = 0;
-                while (i < html.length && html.charCodeAt(i) <= 32) i++;
-                return html.slice(0, i);
-            }
-            function removeLeadingRows(tbody, count) {
-                let removed = 0;
-                while (removed < count && tbody.firstChild) {
-                    const node = tbody.firstChild;
-                    if (node.nodeType === 1) removed++;
-                    node.remove();
-                }
-                // The text between the removed row and the next one holds the
-                // removed row's trailing whitespace plus the next row's
-                // leading whitespace; a full render starts with the latter only.
-                const first = tbody.firstChild;
-                if (first && first.nodeType === 3) first.data = state.leadWs || '';
-            }
-            function clearPending() {
-                state.pendingAppend = [];
-                state.pendingRemove = 0;
-                if (state.flushTimer) { clearTimeout(state.flushTimer); state.flushTimer = null; }
-            }
-            function renderFull(rows) {
-                const tbody = document.getElementById(opts.tbodyId);
-                if (!tbody) return;
-                clearPending();
-                state.needsRender = false;
-                const visible = opts.makeFilter ? opts.makeFilter() : opts.visible;
-                const filtered = dedupeLogRecords(rows || opts.getRows()).filter(visible);
-                state.renderedCount = filtered.length;
-                state.lastFlushAt = performance.now();
-                if (filtered.length && state.leadWs === null) state.leadWs = leadingWhitespace(filtered[0]);
-                if (filtered.length === 0) { tbody.innerHTML = typeof opts.emptyHtml === 'function' ? opts.emptyHtml() : opts.emptyHtml; }
-                else {
-                    tbody.innerHTML = filtered.map(opts.rowHtml).join('');
-                }
-            }
-            function flush() {
-                state.flushTimer = null;
-                if (!tabVisible() || state.needsRender) { state.needsRender = true; clearPending(); return; }
-                const tbody = document.getElementById(opts.tbodyId);
-                if (!tbody) return;
-                // An empty table shows the placeholder row; rebuild in that case.
-                if (state.renderedCount === 0 || state.pendingRemove >= state.renderedCount) { renderFull(); return; }
-                const appendRows = state.pendingAppend;
-                const removeCount = state.pendingRemove;
-                state.pendingAppend = [];
-                state.pendingRemove = 0;
-                if (appendRows.length && state.leadWs === null) state.leadWs = leadingWhitespace(appendRows[0]);
-                if (removeCount) removeLeadingRows(tbody, removeCount);
-                if (appendRows.length) tbody.insertAdjacentHTML('beforeend', appendRows.map(opts.rowHtml).join(''));
-                state.renderedCount += appendRows.length - removeCount;
-                state.lastFlushAt = performance.now();
-            }
-            function scheduleFlush() {
-                if (state.flushTimer) return;
-                if (state.renderedCount < LIVE_TABLE_LARGE_ROWS) { flush(); return; }
-                const wait = Math.max(0, state.lastFlushAt + LIVE_TABLE_LARGE_INTERVAL_MS - performance.now());
-                state.flushTimer = setTimeout(flush, wait);
-            }
-            return {
-                state,
-                tabVisible,
-                renderFull,
-                // Replace all rows (full snapshot from the server).
-                setAll(rows) {
-                    state.lastSeq = (rows || []).reduce((max, r) => Math.max(max, seqOf(r)), 0);
-                    if (tabVisible()) renderFull();
-                    else { clearPending(); state.needsRender = true; }
-                },
-                // Apply a delta: new rows plus `min_seq` (rows that left the server cache).
-                applyDelta(payload) {
-                    const minSeq = Number(payload?.min_seq) || 0;
-                    const rows = opts.getRows();
-                    const fresh = (payload?.rows || []).filter(r => seqOf(r) > state.lastSeq);
-                    if (fresh.length) state.lastSeq = Math.max(state.lastSeq, ...fresh.map(seqOf));
-                    const knownKeys = new Set(rows.map(logRecordKey));
-                    const added = fresh.filter(r => !knownKeys.has(logRecordKey(r)));
-                    const evicted = minSeq ? rows.filter(r => seqOf(r) < minSeq) : [];
-                    let next = evicted.length ? rows.filter(r => seqOf(r) >= minSeq) : rows;
-                    for (const r of added) next.push(r);
-                    opts.setRows(next);
-                    if (!added.length && !evicted.length) return false;
-                    if (!tabVisible() || state.needsRender) { state.needsRender = true; clearPending(); return true; }
-                    const visible = opts.makeFilter ? opts.makeFilter() : opts.visible;
-                    for (const r of added) if (visible(r)) state.pendingAppend.push(r);
-                    state.pendingRemove += evicted.filter(visible).length;
-                    scheduleFlush();
-                    return true;
-                },
-                onTabShown() {
-                    if (state.needsRender) renderFull();
-                },
-            };
-        }
-
         socket.on('update_specific_event_table', (d) => {
              lastSpecificEventData = dedupeLogRecords(d);
-             specificLive.setAll(lastSpecificEventData);
-        });
-
-        // One row of the Specific Validator table.  Full renders and appended
-        // rows use this same template, so both paths produce identical HTML.
-        function specificRowHtml(res) {
-             return `<tr class="hover:bg-gray-50 border-b text-sm"><td class="py-2 px-3 text-purple-700 text-sm">${res.device_name}</td><td class="py-2 px-3 text-sm font-semibold ${res.status === 'PASSED'?'text-green-600':'text-red-600'}">${res.status}</td><td class="py-2 px-3"><span class="event-name-link cursor-pointer text-sm font-medium text-indigo-700 hover:underline" data-event-name="${escapeAttribute(res.event_name)}">${res.event_name}</span></td><td class="py-2 px-3 details-cell text-sm">${res.details}</td><td class="py-2 px-3 log-cell text-xs font-normal text-gray-600">${escapeHTML(res.raw_log || '')}</td><td class="py-2 px-3"><button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(res.json_data)}'>View JSON</button></td></tr>`;
-        }
-
-        function specificRowVisible(r) {
-             const sourceFilter = document.querySelector('input[name="specificSourceFilter"]:checked')?.value || 'all';
-             const textFilter = (document.getElementById('specificParamInput')?.value || '').trim().toLowerCase();
-             if (selectedDevice !== 'all' && r.device_id !== selectedDevice) return false;
-             if (sourceFilter !== 'all' && (r.source || 'firebase') !== sourceFilter) return false;
-             if (textFilter && !(r.raw_log || '').toLowerCase().includes(textFilter)) return false;
-             return true;
-        }
-
-        var specificLive = createLiveTable({
-             tbodyId: 'specificEventTableBody',
-             tabContentId: 'tabContentSpecific',
-             emptyHtml: '<tr><td colspan="6" class="text-center py-4">Waiting...</td></tr>',
-             getRows: () => lastSpecificEventData,
-             setRows: rows => { lastSpecificEventData = rows; },
-             rowHtml: specificRowHtml,
-             visible: specificRowVisible,
+             renderSpecificEventTable();
         });
 
         function renderSpecificEventTable() {
-             specificLive.renderFull();
+             const tbody = document.getElementById('specificEventTableBody');
+             if (!tbody) return;
+             const sourceFilter = document.querySelector('input[name="specificSourceFilter"]:checked')?.value || 'all';
+             const textFilter = (document.getElementById('specificParamInput')?.value || '').trim().toLowerCase();
+             const filtered = dedupeLogRecords(lastSpecificEventData).filter(r => {
+                 if (selectedDevice !== 'all' && r.device_id !== selectedDevice) return false;
+                 if (sourceFilter !== 'all' && (r.source || 'firebase') !== sourceFilter) return false;
+                 if (textFilter && !(r.raw_log || '').toLowerCase().includes(textFilter)) return false;
+                 return true;
+             });
+             if(filtered.length === 0) { tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4">Waiting...</td></tr>'; }
+             else {
+                 tbody.innerHTML = filtered.map(res => `<tr class="hover:bg-gray-50 border-b text-sm"><td class="py-2 px-3 text-purple-700 text-sm">${res.device_name}</td><td class="py-2 px-3 text-sm font-semibold ${res.status === 'PASSED'?'text-green-600':'text-red-600'}">${res.status}</td><td class="py-2 px-3"><span class="event-name-link cursor-pointer text-sm font-medium text-indigo-700 hover:underline" data-event-name="${escapeAttribute(res.event_name)}">${res.event_name}</span></td><td class="py-2 px-3 details-cell text-sm">${res.details}</td><td class="py-2 px-3 log-cell text-xs font-normal text-gray-600">${escapeHTML(res.raw_log || '')}</td><td class="py-2 px-3"><button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(res.json_data)}'>View JSON</button></td></tr>`).join('');
+             }
         }
-
-        socket.on('specific_event_delta', (payload) => specificLive.applyDelta(payload));
-
         let lastAdRevenueData = [];
 
          socket.on('update_adrevenue_table', (d) => {
              lastAdRevenueData = dedupeLogRecords(d);
-             adRevenueLive.setAll(lastAdRevenueData);
+             renderAdRevenueTable();
         });
-        socket.on('adrevenue_delta', (payload) => adRevenueLive.applyDelta(payload));
 
-        function adRevenueRowHtml(res) {
-            return `<tr class="hover:bg-gray-50 border-b text-sm"><td class="py-2 px-3 text-purple-700 text-sm align-top whitespace-nowrap">${res.device_name}</td><td class="py-2 px-3 text-sm font-semibold ${res.status === 'PASSED'?'text-green-600':(res.status === 'FAILED'?'text-red-600':'text-orange-500')} align-top whitespace-nowrap">${res.status}</td><td class="py-2 px-3 align-top"><span class="event-name-link cursor-pointer text-sm font-medium text-indigo-700 hover:underline" data-event-name="${escapeAttribute(res.event_name)}">${res.event_name}</span></td><td class="py-2 px-3 details-cell text-sm align-top"><div class="adrevenue-panel adrevenue-details-panel">${res.details}</div></td><td class="py-2 px-3 log-cell text-xs font-normal text-gray-600 align-top"><div class="adrevenue-panel adrevenue-raw-panel">${escapeHTML(res.raw_log || '')}</div></td><td class="py-2 px-3 align-top whitespace-nowrap"><button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(res.json_data)}'>View JSON</button></td></tr>`;
-        }
-
-        var adRevenueLive = createLiveTable({
-            tbodyId: 'adRevenueTableBody',
-            tabContentId: 'tabContentAdRevenue',
-            emptyHtml: '<tr><td colspan="6" class="text-center py-4">Waiting...</td></tr>',
-            getRows: () => lastAdRevenueData,
-            setRows: rows => { lastAdRevenueData = rows; },
-            rowHtml: adRevenueRowHtml,
-            makeFilter: () => {
+        function renderAdRevenueTable() {
+            const tbody = document.getElementById('adRevenueTableBody');
+            if (!tbody) return;
             const filterText = document.getElementById('adRevenueFilterInput').value.toLowerCase();
             const sourceFilter = document.querySelector('input[name="adRevenueSourceFilter"]:checked')?.value || 'all';
-                return r => {
+            const filtered = dedupeLogRecords(lastAdRevenueData).filter(r => {
                 if (selectedDevice !== 'all' && r.device_id !== selectedDevice) return false;
                 if (sourceFilter !== 'all' && (r.source || '').toLowerCase() !== sourceFilter) return false;
                 if (filterText && !(r.raw_log || '').toLowerCase().includes(filterText)) return false;
                 return true;
-                };
-            },
-        });
-
-        function renderAdRevenueTable() {
-            adRevenueLive.renderFull();
+            });
+            if(filtered.length === 0) { tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4">Waiting...</td></tr>'; }
+            else {
+                tbody.innerHTML = filtered.map(res => `<tr class="hover:bg-gray-50 border-b text-sm"><td class="py-2 px-3 text-purple-700 text-sm align-top whitespace-nowrap">${res.device_name}</td><td class="py-2 px-3 text-sm font-semibold ${res.status === 'PASSED'?'text-green-600':(res.status === 'FAILED'?'text-red-600':'text-orange-500')} align-top whitespace-nowrap">${res.status}</td><td class="py-2 px-3 align-top"><span class="event-name-link cursor-pointer text-sm font-medium text-indigo-700 hover:underline" data-event-name="${escapeAttribute(res.event_name)}">${res.event_name}</span></td><td class="py-2 px-3 details-cell text-sm align-top"><div class="adrevenue-panel adrevenue-details-panel">${res.details}</div></td><td class="py-2 px-3 log-cell text-xs font-normal text-gray-600 align-top"><div class="adrevenue-panel adrevenue-raw-panel">${escapeHTML(res.raw_log || '')}</div></td><td class="py-2 px-3 align-top whitespace-nowrap"><button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(res.json_data)}'>View JSON</button></td></tr>`).join('');
+            }
         }
 
         // ============================================
@@ -7313,35 +6713,23 @@ HTML_TEMPLATE = """
         
         let lastCallbackData = [];
 
-        socket.on('callback_ad_delta', (payload) => callbackLive.applyDelta(payload));
         socket.on('update_callback_ad_table', (d) => {
             lastCallbackData = dedupeLogRecords(d);
-            callbackLive.setAll(lastCallbackData);
+            renderCallbackTable();
         });
 
-        function callbackRowHtml(res) {
-                     const nameLower = (res.event_name || '').toLowerCase();
-                     const isFailed = nameLower.includes('failed');
-                     const isImpression = nameLower.includes('onimpression') || nameLower.includes('_onimpression');
-                     const eventClass = isFailed ? 'text-red-600' : (isImpression ? 'text-blue-600' : '');
-                     return `<tr class="hover:bg-gray-50 border-b text-sm"><td class="py-2 px-3 text-purple-700 text-sm align-top">${res.device_name}</td><td class="py-2 px-3 text-sm font-semibold align-top ${res.type==='Ad Event'?'text-orange-600':'text-cyan-600'}">${res.type}</td><td class="py-2 px-3 text-sm font-medium align-top ${eventClass}">${res.event_name}</td><td class="py-2 px-3 details-cell text-sm align-top"><div class="max-h-64 overflow-auto">${res.details}</div></td><td class="py-2 px-3 log-cell text-xs font-normal text-gray-600 align-top"><div class="max-h-64 overflow-auto whitespace-pre-wrap break-all">${escapeHTML(res.raw_log || '')}</div></td><td class="py-2 px-3 align-top"><button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(res.json_data)}'>View JSON</button></td></tr>`;
-        }
+        function renderCallbackTable() {
+            const d = lastCallbackData;
+            const tbody = document.getElementById('callbackAdTableBody');
+            if (!tbody) return;
 
-        var callbackLive = createLiveTable({
-            tbodyId: 'callbackAdTableBody',
-            tabContentId: 'tabContentCallbackAd',
-            emptyHtml: '<tr><td colspan="6" class="text-center py-4">Waiting...</td></tr>',
-            getRows: () => lastCallbackData,
-            setRows: rows => { lastCallbackData = rows; },
-            rowHtml: callbackRowHtml,
-            makeFilter: () => {
             // Get filter values. Multiple callback groups can be selected together.
             const selectedTypeFilters = Array.from(document.querySelectorAll('input[name="callbackType"]:checked'))
                 .map(input => input.value)
                 .filter(value => value !== 'all');
             const textFilter = document.getElementById('callbackAdFilterInput').value.toLowerCase();
 
-                return r => {
+            const filtered = dedupeLogRecords(d).filter(r => {
                 // Device filter
                 if (selectedDevice !== 'all' && r.device_id !== selectedDevice) return false;
                 
@@ -7360,12 +6748,18 @@ HTML_TEMPLATE = """
                 if (textFilter && !r.raw_log.toLowerCase().includes(textFilter)) return false;
 
                 return true;
-                };
-            },
-        });
+            });
 
-        function renderCallbackTable() {
-            callbackLive.renderFull();
+             if(filtered.length === 0) { tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4">Waiting...</td></tr>'; }
+             else {
+                 tbody.innerHTML = filtered.map(res => {
+                     const nameLower = (res.event_name || '').toLowerCase();
+                     const isFailed = nameLower.includes('failed');
+                     const isImpression = nameLower.includes('onimpression') || nameLower.includes('_onimpression');
+                     const eventClass = isFailed ? 'text-red-600' : (isImpression ? 'text-blue-600' : '');
+                     return `<tr class="hover:bg-gray-50 border-b text-sm"><td class="py-2 px-3 text-purple-700 text-sm align-top">${res.device_name}</td><td class="py-2 px-3 text-sm font-semibold align-top ${res.type==='Ad Event'?'text-orange-600':'text-cyan-600'}">${res.type}</td><td class="py-2 px-3 text-sm font-medium align-top ${eventClass}">${res.event_name}</td><td class="py-2 px-3 details-cell text-sm align-top"><div class="max-h-64 overflow-auto">${res.details}</div></td><td class="py-2 px-3 log-cell text-xs font-normal text-gray-600 align-top"><div class="max-h-64 overflow-auto whitespace-pre-wrap break-all">${escapeHTML(res.raw_log || '')}</div></td><td class="py-2 px-3 align-top"><button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(res.json_data)}'>View JSON</button></td></tr>`;
+                 }).join('');
+             }
         }
 
         // Add listeners
@@ -7402,39 +6796,17 @@ HTML_TEMPLATE = """
             document.querySelectorAll('input[name="priceRotationAdTypeFilter"]').forEach(input => {
                 input.checked = input === allAdTypeFilter;
             });
-            // Same placeholder as before, rendered through the live table so it
-            // knows the table is empty again.
-            if (tbody && typeof priceRotationLive !== 'undefined' && priceRotationLive) priceRotationLive.renderFull();
+            if (tbody) tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4">Waiting...</td></tr>';
         }
 
-        socket.on('price_rotation_delta', (payload) => priceRotationLive.applyDelta(payload));
         socket.on('update_price_rotation_table', (data) => {
             lastPriceRotationData = dedupeLogRecords(data);
-            priceRotationLive.setAll(lastPriceRotationData);
+            renderPriceRotationTable();
         });
 
-        function priceRotationRowHtml(res) {
-                const jsonData = res.json_data && res.json_data !== '{}' ? res.json_data : '';
-                const action = jsonData
-                    ? `<button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(jsonData)}'>View JSON</button>`
-                    : '<span class="text-xs text-gray-400">-</span>';
-                return `<tr class="hover:bg-gray-50 border-b text-sm">
-                    <td class="py-2 px-3 text-purple-700 text-sm align-top truncate" title="${escapeAttribute(res.device_name || res.device_id || '')}">${escapeHTML(res.device_name || res.device_id || '')}</td>
-                    <td class="py-2 px-3 text-sm font-semibold text-cyan-600 align-top break-words">${escapeHTML(res.type || 'Unknown')}</td>
-                    <td class="py-2 px-3 align-top price-rotation-details"><pre class="text-xs font-mono whitespace-pre-wrap break-all max-h-64 overflow-auto">${escapeHTML(res.details || '')}</pre></td>
-                    <td class="py-2 px-3 log-cell text-xs font-normal text-gray-600 align-top"><div class="max-h-64 overflow-auto whitespace-pre-wrap break-all">${escapeHTML(res.raw_log || '')}</div></td>
-                    <td class="py-2 px-3 align-top whitespace-nowrap">${action}</td>
-                </tr>`;
-        }
-
-        var priceRotationLive = createLiveTable({
-            tbodyId: 'priceRotationTableBody',
-            tabContentId: 'tabContentPriceRotation',
-            emptyHtml: '<tr><td colspan="5" class="text-center py-4">Waiting...</td></tr>',
-            getRows: () => lastPriceRotationData,
-            setRows: rows => { lastPriceRotationData = rows; },
-            rowHtml: priceRotationRowHtml,
-            makeFilter: () => {
+        function renderPriceRotationTable() {
+            const tbody = document.getElementById('priceRotationTableBody');
+            if (!tbody) return;
             const filterInput = document.getElementById('priceRotationFilterInput');
             const selectedTypeFilters = Array.from(document.querySelectorAll('input[name="priceRotationTypeFilter"]:checked'))
                 .map(input => input.value)
@@ -7450,7 +6822,7 @@ HTML_TEMPLATE = """
                 .trim()
                 .toLowerCase()
                 .replace(/[^a-z0-9]+/g, '');
-                return res => {
+            const filtered = lastPriceRotationData.filter(res => {
                 if (selectedDevice !== 'all' && res.device_id !== selectedDevice) return false;
                 const rotationType = normalizePriceRotationType(res.type);
                 if (rotationType === 'ascendx' || rotationType === 'cloudx') return false;
@@ -7462,12 +6834,26 @@ HTML_TEMPLATE = """
                 if (selectedAdTypeFilters.length > 0 && !selectedAdTypeFilters.some(value => rawLog.includes(value))) return false;
                 if (textFilter && !rawLog.includes(textFilter)) return false;
                 return true;
-                };
-            },
-        });
+            });
 
-        function renderPriceRotationTable() {
-            priceRotationLive.renderFull();
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4">Waiting...</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = filtered.map(res => {
+                const jsonData = res.json_data && res.json_data !== '{}' ? res.json_data : '';
+                const action = jsonData
+                    ? `<button class="view-json-btn text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-2 rounded" data-json='${escapeAttribute(jsonData)}'>View JSON</button>`
+                    : '<span class="text-xs text-gray-400">-</span>';
+                return `<tr class="hover:bg-gray-50 border-b text-sm">
+                    <td class="py-2 px-3 text-purple-700 text-sm align-top truncate" title="${escapeAttribute(res.device_name || res.device_id || '')}">${escapeHTML(res.device_name || res.device_id || '')}</td>
+                    <td class="py-2 px-3 text-sm font-semibold text-cyan-600 align-top break-words">${escapeHTML(res.type || 'Unknown')}</td>
+                    <td class="py-2 px-3 align-top price-rotation-details"><pre class="text-xs font-mono whitespace-pre-wrap break-all max-h-64 overflow-auto">${escapeHTML(res.details || '')}</pre></td>
+                    <td class="py-2 px-3 log-cell text-xs font-normal text-gray-600 align-top"><div class="max-h-64 overflow-auto whitespace-pre-wrap break-all">${escapeHTML(res.raw_log || '')}</div></td>
+                    <td class="py-2 px-3 align-top whitespace-nowrap">${action}</td>
+                </tr>`;
+            }).join('');
         }
 
         document.getElementById('priceRotationFilterInput')?.addEventListener('input', renderPriceRotationTable);
@@ -7538,9 +6924,9 @@ HTML_TEMPLATE = """
                 selectedDevice,
                 filterText: document.getElementById('packageFilterInput').value.toLowerCase(),
                 filterText2: document.getElementById('packageFilterInput2').value.toLowerCase(),
-                filterText3: document.getElementById('packageFilterInput3').value.toLowerCase(),
                 tagFilter: document.getElementById('packageTagFilterInput').value.toLowerCase(),
-                quick: resolveQuickFilter(selectedQuickFilter?.value || ''),
+                quickTag: selectedQuickFilter?.dataset.messageNeedle ? '' : (selectedQuickFilter?.value || ''),
+                quickMessage: selectedQuickFilter?.dataset.messageNeedle || '',
                 errorsOnly: document.getElementById('showErrorsOnly').checked,
                 warningsOnly: document.getElementById('showWarningsOnly').checked,
             };
@@ -7557,20 +6943,17 @@ HTML_TEMPLATE = """
                 } else if (state.warningsOnly) {
                     if (!isWarningLevel) return false;
                 }
-                // Message filters search the whole log line (time, level, tag,
-                // message, device), like the saved-session search does.
-                const logText = `${l.time_display || l.time || ''} ${l.level || ''} ${l.tag || ''}: ${l.message || ''} ${l.log || ''} ${l.device_name || ''}`;
-                const logHaystack = logText.toLowerCase();
+                const messageHaystack = `${l.message || ''}`.toLowerCase();
                 const tagHaystack = `${l.tag || ''}`.toLowerCase();
-                if (state.quick) {
-                    const quick = state.quick;
-                    if (quick.tag && !tagHaystack.includes(quick.tag)) return false;
-                    if (quick.terms.some(term => !logHaystack.includes(term))) return false;
+                const exactMessage = `${l.message || l.log || ''}`;
+                if (state.quickTag) {
+                    const quickNeedle = state.quickTag.toLowerCase();
+                    if (!tagHaystack.includes(quickNeedle)) return false;
                 }
+                if (state.quickMessage && !exactMessage.includes(state.quickMessage)) return false;
                 if (state.tagFilter && !tagHaystack.includes(state.tagFilter)) return false;
-                if (state.filterText && !logHaystack.includes(state.filterText)) return false;
-                if (state.filterText2 && !logHaystack.includes(state.filterText2)) return false;
-                if (state.filterText3 && !logHaystack.includes(state.filterText3)) return false;
+                if (state.filterText && !messageHaystack.includes(state.filterText)) return false;
+                if (state.filterText2 && !messageHaystack.includes(state.filterText2)) return false;
                 return true;
             });
         }
@@ -7845,13 +7228,11 @@ HTML_TEMPLATE = """
 
         function searchWholePackageSession() {
             // Live filters cover the in-memory rows; this runs the same
-            // Filter 1-3 / Tag / quick filters on every saved row of the
+            // Message 1 / Message 2 / Tag filters on every saved row of the
             // session through the History view.
             const message1 = document.getElementById('packageFilterInput')?.value || '';
             const message2 = document.getElementById('packageFilterInput2')?.value || '';
-            const message3 = document.getElementById('packageFilterInput3')?.value || '';
             const tag = document.getElementById('packageTagFilterInput')?.value || '';
-            const quickId = document.querySelector('input[name="tagQuickFilter"]:checked')?.value || '';
             const modal = document.getElementById('packageHistoryModal');
             if (!modal) return;
             modal.style.zIndex = '60';
@@ -7868,10 +7249,7 @@ HTML_TEMPLATE = """
                     }
                     document.getElementById('packageHistoryFilterInput').value = message1;
                     document.getElementById('packageHistoryFilterInput2').value = message2;
-                    document.getElementById('packageHistoryFilterInput4').value = message3;
                     document.getElementById('packageHistoryFilterInput3').value = tag;
-                    renderHistoryQuickFilterOptions();
-                    document.getElementById('packageHistoryQuickFilter').value = quickId;
                     loadSelectedPackageHistory(false);
                 })
                 .catch(err => {
@@ -8022,10 +7400,6 @@ HTML_TEMPLATE = """
         socket.on('connect', () => requestPackageLogSync());
         socket.on('package_log_reset', (payload) => {
             resetPackageLogStore(payload ? payload.stream : null, payload ? payload.session_id : null);
-            if (payload && 'package_id' in payload) {
-                packageStreamTarget = payload.package_id || '';
-                renderPackageStreamProjects();
-            }
             renderPackageLogTable(true);
         });
         socket.on('package_log_delta', (payload) => {
@@ -8135,9 +7509,7 @@ HTML_TEMPLATE = """
             const select = document.getElementById('packageHistorySessionSelect');
             const keyword1 = document.getElementById('packageHistoryFilterInput')?.value || '';
             const keyword2 = document.getElementById('packageHistoryFilterInput2')?.value || '';
-            const keyword3 = document.getElementById('packageHistoryFilterInput4')?.value || '';
             const tagKeyword = document.getElementById('packageHistoryFilterInput3')?.value || '';
-            const quickId = document.getElementById('packageHistoryQuickFilter')?.value || '';
             if (!select || !select.value) {
                 packageHistoryLoadedRows = [];
                 packageHistoryOffset = 0;
@@ -8152,9 +7524,6 @@ HTML_TEMPLATE = """
                 q1: keyword1,
                 q2: keyword2,
                 q3: tagKeyword,
-                q4: keyword3,
-                qf: quickId,
-                qp: quickFilterPlatform(),
                 offset: String(offset),
                 limit: String(PACKAGE_HISTORY_PAGE_SIZE),
             });
@@ -8179,9 +7548,7 @@ HTML_TEMPLATE = """
                         const filters = [
                             keyword1 ? `text1:${keyword1}` : '',
                             keyword2 ? `text2:${keyword2}` : '',
-                            keyword3 ? `text3:${keyword3}` : '',
                             tagKeyword ? `tag:${tagKeyword}` : '',
-                            quickId ? `quick:${(packageQuickFilters.find(f => f.id === quickId) || {}).name || quickId}` : '',
                         ].filter(Boolean).join(' | ');
                         meta.textContent = `Selected: ${current.package_id} | Started: ${current.started_label} | Status: ${current.status} | Showing: ${packageHistoryLoadedRows.length} / ${data.total_rows}${filters ? ` | Filter: ${filters}` : ''}`;
                     }
@@ -8202,9 +7569,7 @@ HTML_TEMPLATE = """
             const select = document.getElementById('packageHistorySessionSelect');
             const keyword1 = document.getElementById('packageHistoryFilterInput')?.value || '';
             const keyword2 = document.getElementById('packageHistoryFilterInput2')?.value || '';
-            const keyword3 = document.getElementById('packageHistoryFilterInput4')?.value || '';
             const tagKeyword = document.getElementById('packageHistoryFilterInput3')?.value || '';
-            const quickId = document.getElementById('packageHistoryQuickFilter')?.value || '';
             if (!select || !select.value) {
                 alert('Please select a recorded session first.');
                 return;
@@ -8217,9 +7582,6 @@ HTML_TEMPLATE = """
                     q1: filteredOnly ? keyword1 : '',
                     q2: filteredOnly ? keyword2 : '',
                     q3: filteredOnly ? tagKeyword : '',
-                    q4: filteredOnly ? keyword3 : '',
-                    qf: filteredOnly ? quickId : '',
-                    qp: quickFilterPlatform(),
                     filtered_only: filteredOnly,
                 }),
             })
@@ -8257,8 +7619,6 @@ HTML_TEMPLATE = """
                     document.getElementById('packageHistoryFilterInput').value = '';
                     document.getElementById('packageHistoryFilterInput2').value = '';
                     document.getElementById('packageHistoryFilterInput3').value = '';
-                    document.getElementById('packageHistoryFilterInput4').value = '';
-                    document.getElementById('packageHistoryQuickFilter').value = '';
                     document.getElementById('packageHistoryMeta').textContent = 'No saved package-log sessions yet.';
                     renderPackageHistoryRows([]);
                     alert(`Cleared ${data.deleted_sessions} session(s) and ${data.deleted_rows} log row(s).`);
@@ -8272,13 +7632,9 @@ HTML_TEMPLATE = """
             const filter1 = document.getElementById('packageHistoryFilterInput');
             const filter2 = document.getElementById('packageHistoryFilterInput2');
             const filter3 = document.getElementById('packageHistoryFilterInput3');
-            const filter4 = document.getElementById('packageHistoryFilterInput4');
             if (filter1) filter1.value = '';
             if (filter2) filter2.value = '';
             if (filter3) filter3.value = '';
-            if (filter4) filter4.value = '';
-            const quickSelect = document.getElementById('packageHistoryQuickFilter');
-            if (quickSelect) quickSelect.value = '';
             if (reload) loadSelectedPackageHistory(false);
         }
 
@@ -8667,25 +8023,17 @@ HTML_TEMPLATE = """
         };
         document.getElementById('packageFilterInput').addEventListener('input', schedulePackageRender);
         document.getElementById('packageFilterInput2').addEventListener('input', schedulePackageRender);
-        document.getElementById('packageFilterInput3').addEventListener('input', schedulePackageRender);
         document.getElementById('packageTagFilterInput').addEventListener('input', () => {
             const allOpt = document.querySelector('input[name="tagQuickFilter"][value=""]');
             if (allOpt) allOpt.checked = true;
             schedulePackageRender();
         });
-        document.getElementById('packageQuickFilterPanel')?.addEventListener('change', (e) => {
-            if (e.target?.name !== 'tagQuickFilter') return;
-            // Choosing a quick filter starts a fresh search: clear the typed filters.
-            ['packageTagFilterInput', 'packageFilterInput', 'packageFilterInput2', 'packageFilterInput3'].forEach(id => {
-                const input = document.getElementById(id);
-                if (input) input.value = '';
-            });
+        document.querySelectorAll('input[name="tagQuickFilter"]').forEach(r => r.addEventListener('change', (e) => {
+            const tagInput = document.getElementById('packageTagFilterInput');
+            if (tagInput && e.target.value) tagInput.value = '';
             renderPackageLogTable(true);
-        });
+        }));
         document.getElementById('packageFilterInput').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); renderPackageLogTable(true); }
-        });
-        document.getElementById('packageFilterInput3').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); renderPackageLogTable(true); }
         });
         document.getElementById('packageFilterInput2').addEventListener('keydown', (e) => {
@@ -8713,24 +8061,11 @@ HTML_TEMPLATE = """
                 loadSelectedPackageHistory(false);
             }
         });
-        document.getElementById('packageHistoryFilterInput4').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                loadSelectedPackageHistory(false);
-            }
-        });
         document.getElementById('packageHistoryFilterInput2').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 loadSelectedPackageHistory(false);
             }
-        });
-        document.getElementById('packageHistoryQuickFilter')?.addEventListener('change', () => {
-            ['packageHistoryFilterInput', 'packageHistoryFilterInput2', 'packageHistoryFilterInput3', 'packageHistoryFilterInput4'].forEach(id => {
-                const input = document.getElementById(id);
-                if (input) input.value = '';
-            });
-            loadSelectedPackageHistory(false);
         });
         document.getElementById('packageHistoryFilterInput3').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
@@ -8769,7 +8104,7 @@ HTML_TEMPLATE = """
             }
         });
 
-        ['packageHistorySessionSelect','loadPackageHistoryBtn','loadMorePackageHistoryBtn','refreshPackageSessionsBtn','exportPackageHistoryAllBtn','exportPackageHistoryFilteredBtn','clearPackageHistoryBtn','clearPackageHistoryFiltersBtn','packageHistoryFilterInput','packageHistoryFilterInput2','packageHistoryFilterInput3','packageHistoryFilterInput4','packageHistoryQuickFilter','closePackageHistoryModal'].forEach(id => {
+        ['packageHistorySessionSelect','loadPackageHistoryBtn','loadMorePackageHistoryBtn','refreshPackageSessionsBtn','exportPackageHistoryAllBtn','exportPackageHistoryFilteredBtn','clearPackageHistoryBtn','clearPackageHistoryFiltersBtn','packageHistoryFilterInput','packageHistoryFilterInput2','packageHistoryFilterInput3','closePackageHistoryModal'].forEach(id => {
             document.getElementById(id)?.addEventListener('focus', clearPackageHistorySelection);
             document.getElementById(id)?.addEventListener('click', () => { clearPackageHistorySelection(); });
         });
@@ -9070,48 +8405,11 @@ HTML_TEMPLATE = """
             packageStreamModal?.classList.add('hidden');
         }
 
-        // Project switcher inside the Stream window.  Switching works like
-        // Stop + Start outside: the server closes and keeps the current
-        // session in history, then starts a new session for the new project.
-        var packageStreamTarget = '';
-        function renderPackageStreamProjects() {
-            const select = document.getElementById('packageStreamProjectSelect');
-            if (!select) return;
-            const platform = activePlatform === 'ios' ? 'ios' : 'android';
-            const items = (typeof packageLogPresets !== 'undefined' ? packageLogPresets : [])
-                .filter(project => project && project[platform]?.id)
-                .map(project => ({ id: project[platform].id, label: project[platform].label || project[platform].id }));
-            if (packageStreamTarget && !items.some(item => item.id === packageStreamTarget)) {
-                items.unshift({ id: packageStreamTarget, label: `${packageStreamTarget} (custom)` });
-            }
-            select.innerHTML = items.length
-                ? items.map(item => `<option value="${qfEsc(item.id)}">${qfEsc(item.label)}</option>`).join('')
-                : '<option value="">No projects</option>';
-            select.value = packageStreamTarget || '';
-        }
-        function switchPackageStreamProject(pkg) {
-            pkg = String(pkg || '').trim();
-            if (!pkg || pkg === packageStreamTarget) return;
-            setPackagePauseState(false);
-            resetPackageLogUiState();
-            const input = document.getElementById('packageIdInput');
-            if (input) input.value = pkg;
-            document.querySelectorAll('.package-id-checkbox').forEach(cb => { cb.checked = cb.value === pkg; });
-            packageStreamTarget = pkg;
-            socket.emit('start_package_log', {package_id: pkg});
-            setPackageRunningState(true);
-            renderPackageStreamProjects();
-        }
-        document.getElementById('packageStreamProjectSelect')?.addEventListener('change', (e) => {
-            switchPackageStreamProject(e.target.value);
-        });
-
         function resetPackageLogUiState() {
             const packageIdInput = document.getElementById('packageIdInput');
             const tagInput = document.getElementById('packageTagFilterInput');
             const filter1 = document.getElementById('packageFilterInput');
             const filter2 = document.getElementById('packageFilterInput2');
-            const filter3 = document.getElementById('packageFilterInput3');
             const showErrorsOnly = document.getElementById('showErrorsOnly');
             const showWarningsOnly = document.getElementById('showWarningsOnly');
             const autoScroll = document.getElementById('autoScroll');
@@ -9123,7 +8421,6 @@ HTML_TEMPLATE = """
             if (tagInput) tagInput.value = '';
             if (filter1) filter1.value = '';
             if (filter2) filter2.value = '';
-            if (filter3) filter3.value = '';
             if (showErrorsOnly) showErrorsOnly.checked = false;
             if (showWarningsOnly) showWarningsOnly.checked = false;
             if (autoScroll) autoScroll.checked = true;
@@ -9180,8 +8477,6 @@ HTML_TEMPLATE = """
                  return;
              }
              setPackagePauseState(false);
-             packageStreamTarget = pkg;
-             renderPackageStreamProjects();
              openPackageStreamModal();
              socket.emit('start_package_log', {package_id: pkg});
              setPackageRunningState(true);
@@ -9192,7 +8487,6 @@ HTML_TEMPLATE = """
         });
 
         stopPackageLogBtn?.addEventListener('click', () => {
-            packageStreamTarget = '';
             socket.emit('start_package_log', {package_id: ''});
             setPackagePauseState(false);
             closePackageStreamModal();
@@ -9288,7 +8582,6 @@ HTML_TEMPLATE = """
                 packageQuickSelectList.appendChild(label);
             });
             syncPlatformUi();
-            renderPackageStreamProjects();
             const running = startPackageLogBtn && startPackageLogBtn.textContent !== 'Start';
             setPackageControlsEnabled(!running);
         }
@@ -9367,323 +8660,11 @@ HTML_TEMPLATE = """
 </html>
 """
 
-UI_SETTINGS_FILENAME = "ui_settings.json"
-UI_ZOOM_LEVELS = (0.7, 0.75, 0.8, 0.85, 0.9, 1.0, 1.1, 1.25, 1.4)
-
-
-def _ui_settings_path():
-    return os.path.join(_user_data_dir(), UI_SETTINGS_FILENAME)
-
-
-def _load_ui_settings():
-    """Per-machine UI preferences (the desktop webview drops localStorage)."""
-    settings = {"zoom": 1.0, "hide_top": False}
-    try:
-        with open(_ui_settings_path(), "r", encoding="utf-8") as handle:
-            stored = json.load(handle)
-        zoom = float(stored.get("zoom", 1.0))
-        if zoom in UI_ZOOM_LEVELS:
-            settings["zoom"] = zoom
-        if isinstance(stored.get("hide_top"), bool):
-            settings["hide_top"] = stored["hide_top"]
-    except (OSError, ValueError, TypeError, AttributeError):
-        pass
-    return settings
-
-
-@app.post('/api/ui-settings')
-def ui_settings_api():
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or not ({"zoom", "hide_top"} & payload.keys()):
-        return jsonify({"ok": False, "error": "invalid_settings"}), 400
-    settings = _load_ui_settings()
-    if "zoom" in payload:
-        try:
-            zoom = float(payload["zoom"])
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "invalid_zoom"}), 400
-        if zoom not in UI_ZOOM_LEVELS:
-            return jsonify({"ok": False, "error": "invalid_zoom"}), 400
-        settings["zoom"] = zoom
-    if "hide_top" in payload:
-        if not isinstance(payload["hide_top"], bool):
-            return jsonify({"ok": False, "error": "invalid_hide_top"}), 400
-        settings["hide_top"] = payload["hide_top"]
-    path = _ui_settings_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(settings, handle)
-    os.replace(tmp_path, path)
-    return jsonify({"ok": True, **settings})
-
-
-# --- Package Log quick filters (user-editable, saved per machine) ---
-# These are the user's own UI settings, not preset data: they live in the
-# data directory next to ui_settings.json and never ship with a release.
-# Android and iOS keep separate lists in separate files.  A filter works like
-# the filter boxes above the table: Tag (Android only) must appear in the
-# tag; Message 1 and Message 2 must each appear somewhere in the log line.
-PACKAGE_QUICK_FILTER_PLATFORMS = ("android", "ios")
-PACKAGE_QUICK_FILTER_FIELDS = ("tag", "message1", "message2", "message3")
-PACKAGE_QUICK_FILTER_MAX = 30
-DEFAULT_PACKAGE_QUICK_FILTERS = {
-    "android": (
-        {"id": "integrationhelper", "name": "Integrationhelper", "tag": "integrationhelper", "message1": "", "message2": "", "message3": ""},
-        {"id": "appmetrica", "name": "Appmetrica", "tag": "appmetrica", "message1": "", "message2": "", "message3": ""},
-        {"id": "adjust", "name": "Adjust", "tag": "adjust", "message1": "", "message2": "", "message3": ""},
-        {"id": "bidding", "name": "Bidding", "tag": "", "message1": "[ad,", "message2": "bidding", "message3": ""},
-        {"id": "applovinsdk", "name": "Applovinsdk", "tag": "", "message1": "applovinsdk", "message2": "", "message3": ""},
-        {"id": "event_tracking", "name": "Event tracking", "tag": "", "message1": "TrackingService->Track:", "message2": '"EventName":"', "message3": ""},
-        {"id": "ads_event", "name": "Ads Event", "tag": "", "message1": "TrackingService->Track:", "message2": '"EventName":"ad', "message3": ""},
-    ),
-    "ios": (
-        {"id": "integrationhelper", "name": "Integrationhelper", "tag": "", "message1": "integrationhelper", "message2": "", "message3": ""},
-        {"id": "appmetrica", "name": "Appmetrica", "tag": "", "message1": "appmetrica", "message2": "", "message3": ""},
-        {"id": "adjust", "name": "Adjust", "tag": "", "message1": "adjust]", "message2": "", "message3": ""},
-        {"id": "bidding", "name": "Bidding", "tag": "", "message1": "[ad,", "message2": "bidding", "message3": ""},
-        {"id": "applovinsdk", "name": "Applovinsdk", "tag": "", "message1": "applovinsdk", "message2": "", "message3": ""},
-        {"id": "event_tracking", "name": "Event tracking", "tag": "", "message1": "TrackingService->Track:", "message2": '"EventName":"', "message3": ""},
-        {"id": "ads_event", "name": "Ads Event", "tag": "", "message1": "TrackingService->Track:", "message2": '"EventName":"ad', "message3": ""},
-    ),
-}
-_PACKAGE_QUICK_FILTER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
-
-
-def _quick_filter_platform(value):
-    return "ios" if value == "ios" else "android"
-
-
-def _package_quick_filters_path(platform):
-    return os.path.join(_user_data_dir(), f"package_quick_filters_{_quick_filter_platform(platform)}.json")
-
-
-def _default_package_quick_filters(platform):
-    return [dict(item) for item in DEFAULT_PACKAGE_QUICK_FILTERS[_quick_filter_platform(platform)]]
-
-
-def _validate_package_quick_filters(items, platform):
-    """Return (filters, error) with every filter normalized."""
-    platform = _quick_filter_platform(platform)
-    if not isinstance(items, list):
-        return None, "filters_must_be_a_list"
-    if len(items) > PACKAGE_QUICK_FILTER_MAX:
-        return None, "too_many_filters"
-    filters, seen_ids = [], set()
-    for item in items:
-        if not isinstance(item, dict):
-            return None, "invalid_filter"
-        filter_id = str(item.get("id") or "")
-        name = str(item.get("name") or "").strip()
-        if not _PACKAGE_QUICK_FILTER_ID_RE.match(filter_id) or filter_id in seen_ids:
-            return None, "invalid_filter_id"
-        if not name or len(name) > 40:
-            return None, "invalid_filter_name"
-        values = {}
-        for field in PACKAGE_QUICK_FILTER_FIELDS:
-            raw = item.get(field, "")
-            if not isinstance(raw, str) or len(raw) > 200:
-                return None, "invalid_filter_text"
-            values[field] = raw.strip()
-        if platform == "ios" and values["tag"]:
-            # iOS logs have no tag.
-            return None, "ios_filter_has_no_tag"
-        if not any(values.values()):
-            return None, "filter_needs_text"
-        seen_ids.add(filter_id)
-        filters.append({"id": filter_id, "name": name, **values})
-    return filters, None
-
-
-def _write_package_quick_filters(platform, filters, seen_defaults):
-    path = _package_quick_filters_path(platform)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump({"version": 2, "platform": _quick_filter_platform(platform), "filters": filters,
-                   "seen_defaults": sorted(set(seen_defaults))}, handle, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
-
-
-def _backup_broken_package_quick_filters(path):
-    """Keep an unreadable filters file instead of letting a later Save overwrite it."""
-    backup = f"{path}.broken-{time.strftime('%Y%m%d-%H%M%S')}"
-    try:
-        os.replace(path, backup)
-        logging.warning("Quick filter file was unreadable; kept it as %s", backup)
-    except OSError:
-        logging.exception("Could not back up broken quick filter file %s", path)
-
-
-def _load_package_quick_filters(platform):
-    """Saved filters for one platform, or its defaults when nothing is saved.
-
-    The user's list is never overwritten by an update.  Defaults added in a
-    newer release are appended once (tracked in seen_defaults), so a default
-    the user deleted does not come back.
-    """
-    path = _package_quick_filters_path(platform)
-    defaults = _default_package_quick_filters(platform)
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            stored = json.load(handle)
-    except FileNotFoundError:
-        return defaults, True
-    except (OSError, ValueError):
-        _backup_broken_package_quick_filters(path)
-        return defaults, True
-    filters, error = _validate_package_quick_filters(stored.get("filters") if isinstance(stored, dict) else None, platform)
-    if error:
-        _backup_broken_package_quick_filters(path)
-        return defaults, True
-    seen = stored.get("seen_defaults")
-    needs_write = not isinstance(seen, list)
-    if needs_write:
-        # Saved before seen_defaults existed: every current default counts as
-        # seen, and that is recorded now so a later release can tell its new
-        # defaults apart.
-        seen = [item["id"] for item in defaults]
-    seen = {str(item) for item in seen}
-    existing_ids = {item["id"] for item in filters}
-    new_defaults = [item for item in defaults if item["id"] not in seen and item["id"] not in existing_ids]
-    if new_defaults and len(filters) + len(new_defaults) <= PACKAGE_QUICK_FILTER_MAX:
-        filters = filters + new_defaults
-        seen |= {item["id"] for item in new_defaults}
-        needs_write = True
-    if needs_write:
-        try:
-            _write_package_quick_filters(platform, filters, seen)
-        except OSError:
-            logging.exception("Could not save the quick filter list")
-    return filters, False
-
-
-def _package_quick_filter_sql(filter_id, platform):
-    """SQL clause for one saved quick filter, or (None, None) when unknown.
-
-    Same rules as the live view.  instr() keeps the text literal (LIKE would
-    treat _ and % as wildcards).
-    """
-    filters, _ = _load_package_quick_filters(platform)
-    item = next((f for f in filters if f["id"] == filter_id), None)
-    if item is None:
-        return None, None
-    whole_log = ("raw_log", "message", "tag", "device_name")
-    checks = [(item["tag"], ("tag",)), (item["message1"], whole_log), (item["message2"], whole_log), (item["message3"], whole_log)]
-    clause, params = "", []
-    for text, columns in checks:
-        if not text:
-            continue
-        # Never case sensitive.
-        parts = [f"instr(lower(coalesce({col}, '')), ?) > 0" for col in columns]
-        params.extend([text.lower()] * len(columns))
-        clause += " AND (" + " OR ".join(parts) + ")"
-    return clause, params
-
-
-@app.get('/api/package-quick-filters')
-def package_quick_filters_get_api():
-    platform = _quick_filter_platform(request.args.get("platform"))
-    filters, is_default = _load_package_quick_filters(platform)
-    return jsonify({"ok": True, "platform": platform, "filters": filters, "is_default": is_default,
-                    "defaults": _default_package_quick_filters(platform)})
-
-
-@app.post('/api/package-quick-filters')
-def package_quick_filters_save_api():
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or payload.get("platform") not in PACKAGE_QUICK_FILTER_PLATFORMS:
-        return jsonify({"ok": False, "error": "invalid_platform"}), 400
-    platform = payload["platform"]
-    path = _package_quick_filters_path(platform)
-    if payload.get("reset") is True:
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
-        filters, is_default = _load_package_quick_filters(platform)
-        return jsonify({"ok": True, "platform": platform, "filters": filters, "is_default": is_default})
-    filters, error = _validate_package_quick_filters(payload.get("filters"), platform)
-    if error:
-        return jsonify({"ok": False, "error": error}), 400
-    _write_package_quick_filters(platform, filters, [item["id"] for item in _default_package_quick_filters(platform)])
-    return jsonify({"ok": True, "platform": platform, "filters": filters, "is_default": False})
-
-
-PACKAGE_QUICK_FILTER_EXPORT_KIND = "eventinspector_package_quick_filters"
-
-
-@app.post('/api/package-quick-filters/export')
-def package_quick_filters_export_api():
-    """Write a filter list to a JSON file the user picks (backup / share)."""
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or payload.get("platform") not in PACKAGE_QUICK_FILTER_PLATFORMS:
-        return jsonify({"ok": False, "error": "invalid_platform"}), 400
-    platform = payload["platform"]
-    filters, error = _validate_package_quick_filters(payload.get("filters"), platform)
-    if error:
-        return jsonify({"ok": False, "error": error}), 400
-    filename = f"quick_filters_{platform}_{time.strftime('%Y%m%d_%H%M%S')}.json"
-    document = {"kind": PACKAGE_QUICK_FILTER_EXPORT_KIND, "version": 2, "platform": platform, "filters": filters}
-    if payload.get("download") is True:
-        # Opened in a browser (no app window): the page saves the file itself
-        # so the browser can ask where to put it.
-        return jsonify({"ok": True, "filename": filename, "count": len(filters),
-                        "content": json.dumps(document, ensure_ascii=False, indent=2)})
-    export_dir = os.path.join(_user_data_dir(), "exports")
-    os.makedirs(export_dir, exist_ok=True)
-    path = os.path.join(export_dir, filename)
-    try:
-        if webview and getattr(webview, "windows", None):
-            selected = webview.windows[0].create_file_dialog(
-                webview.SAVE_DIALOG,
-                directory=export_dir,
-                save_filename=filename,
-                file_types=("JSON files (*.json)", "All files (*.*)"),
-            )
-            if not selected:
-                return jsonify({"ok": False, "cancelled": True})
-            path = selected[0] if isinstance(selected, (list, tuple)) else selected
-    except Exception:
-        logging.exception("Quick filter save dialog failed")
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(document, handle, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
-    return jsonify({"ok": True, "path": path, "count": len(filters)})
-
-
-@app.post('/api/package-quick-filters/import')
-def package_quick_filters_import_api():
-    """Validate an exported filter file; the editor shows it and the user saves."""
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or payload.get("platform") not in PACKAGE_QUICK_FILTER_PLATFORMS:
-        return jsonify({"ok": False, "error": "invalid_platform"}), 400
-    data = payload.get("data")
-    if not isinstance(data, dict) or not isinstance(data.get("filters"), list):
-        return jsonify({"ok": False, "error": "not_a_quick_filter_file"}), 400
-    file_platform = data.get("platform")
-    if file_platform in PACKAGE_QUICK_FILTER_PLATFORMS and file_platform != payload["platform"]:
-        return jsonify({"ok": False, "error": "wrong_platform", "file_platform": file_platform}), 400
-    filters, error = _validate_package_quick_filters(data["filters"], payload["platform"])
-    if error:
-        return jsonify({"ok": False, "error": error}), 400
-    return jsonify({"ok": True, "platform": payload["platform"], "filters": filters})
-
-
 # --- SERVER ROUTE (QUAN TRỌNG) ---
 @app.route('/')
 def index():
-    ui_settings = _load_ui_settings()
-    ui_zoom = ui_settings["zoom"]
     return render_template_string(
         HTML_TEMPLATE,
-        ui_zoom=ui_zoom,
-        ui_hide_top=ui_settings["hide_top"],
-        package_quick_filters={p: _load_package_quick_filters(p)[0] for p in PACKAGE_QUICK_FILTER_PLATFORMS},
-        package_quick_filter_defaults={p: _default_package_quick_filters(p) for p in PACKAGE_QUICK_FILTER_PLATFORMS},
-        native_file_dialog=bool(webview and getattr(webview, "windows", None)),
-        ui_zoom_px=round(16 * ui_zoom, 2),
         default_event_names=sorted(event_specific_params.keys()),
         current_profile_name=active_profile_name,
         profile_revision=profile_revision,
@@ -10033,10 +9014,7 @@ def package_log_rows_api():
     session_id = request.args.get('session_id', type=int)
     keyword1 = (request.args.get('q1') or request.args.get('q') or '').strip().lower()
     keyword2 = (request.args.get('q2') or '').strip().lower()
-    keyword3 = (request.args.get('q4') or '').strip().lower()
     tag_keyword = (request.args.get('q3') or '').strip().lower()
-    quick_filter_id = (request.args.get('qf') or '').strip()
-    quick_platform = (request.args.get('qp') or '').strip()
     offset = max(request.args.get('offset', default=0, type=int) or 0, 0)
     limit = request.args.get('limit', default=2000, type=int) or 2000
     limit = max(1, min(limit, 5000))
@@ -10073,19 +9051,9 @@ def package_log_rows_api():
             base_where += search_clause()
             like2 = f"%{keyword2}%"
             params.extend([like2, like2, like2, like2])
-        if keyword3:
-            base_where += search_clause()
-            like3 = f"%{keyword3}%"
-            params.extend([like3, like3, like3, like3])
         if tag_keyword:
             base_where += tag_search_clause()
             params.append(f"%{tag_keyword}%")
-        if quick_filter_id:
-            quick_clause, quick_params = _package_quick_filter_sql(quick_filter_id, quick_platform)
-            if quick_clause is None:
-                return jsonify({"ok": False, "error": "unknown_quick_filter"}), 400
-            base_where += quick_clause
-            params.extend(quick_params)
 
         total_rows = conn.execute(f"SELECT COUNT(*) AS c {base_where}", params).fetchone()["c"] or 0
         sql = f"""
@@ -10235,10 +9203,7 @@ def package_log_export_api():
 
     keyword1 = str(payload.get('q1') or '').strip().lower()
     keyword2 = str(payload.get('q2') or '').strip().lower()
-    keyword3 = str(payload.get('q4') or '').strip().lower()
     tag_keyword = str(payload.get('q3') or '').strip().lower()
-    quick_filter_id = str(payload.get('qf') or '').strip()
-    quick_platform = str(payload.get('qp') or '').strip()
     filtered_only = bool(payload.get('filtered_only', True))
     conn = _get_package_db_connection()
     try:
@@ -10279,19 +9244,9 @@ def package_log_export_api():
             like2 = f"%{keyword2}%"
             sql += search_clause()
             params.extend([like2, like2, like2, like2])
-        if keyword3:
-            like3 = f"%{keyword3}%"
-            sql += search_clause()
-            params.extend([like3, like3, like3, like3])
         if tag_keyword:
             sql += tag_search_clause()
             params.append(f"%{tag_keyword}%")
-        if quick_filter_id and filtered_only:
-            quick_clause, quick_params = _package_quick_filter_sql(quick_filter_id, quick_platform)
-            if quick_clause is None:
-                return jsonify({"ok": False, "error": "unknown_quick_filter"}), 400
-            sql += quick_clause
-            params.extend(quick_params)
 
         sql += " ORDER BY id ASC"
         rows = conn.execute(sql, params).fetchall()
@@ -10301,7 +9256,7 @@ def package_log_export_api():
         started_at = session["started_at"] or time.time()
         started_label = time.strftime("%Y%m%d_%H%M%S", time.localtime(started_at))
         package_stub = re.sub(r'[^A-Za-z0-9._-]+', '_', session["package_id"] or f"session_{session_id}")
-        suffix = "filtered" if filtered_only and (keyword1 or keyword2 or keyword3 or tag_keyword or quick_filter_id) else "full"
+        suffix = "filtered" if filtered_only and (keyword1 or keyword2 or tag_keyword) else "full"
         filename = f"package_log_{session_id}_{package_stub}_{started_label}_{suffix}.log"
         path = os.path.join(export_dir, filename)
 
@@ -10462,15 +9417,16 @@ def process_load_ads_unity_log(line, device_id):
             dedup_key = (device_id, str(src), str(fmt), "tracking")
             if dedup_key not in unique_load_ads and _accept_exact_record("load_ads", device_id, line, src, fmt, "tracking"):
                 unique_load_ads.add(dedup_key)
-                _live_table_append("load_ads", {
+                load_ads_events.append({
                     "device_id": device_id,
                     "device_name": d_name,
                     "ad_source": src,
                     "ad_format": fmt,
                     "raw_log": line.strip()
                 })
-                snapshot = True
+                snapshot = list(load_ads_events)
         if snapshot is not None:
+            socketio.emit('update_load_ads', snapshot)
             send_to_sheet(d_name, src, fmt, line.strip(), "LoadAds")
     except Exception:
         pass
@@ -10584,8 +9540,9 @@ def _process_ios_max_viewability_record(raw_record, device_id):
         if not _accept_exact_record("load_ads_ext", device_id, buffered, provider, ad_network, ad_format, "max_viewability"):
             return
         unique_load_ads_ext.add(dedup_key)
-        _live_table_append("load_ads_ext", row)
-        snapshot = True
+        load_ads_ext_events.append(row)
+        snapshot = list(load_ads_ext_events)
+    socketio.emit("update_load_ads_ext", snapshot)
     send_to_sheet(d_name, ad_network, ad_format, buffered, "LoadAdsExt", provider)
 
 
@@ -10624,7 +9581,7 @@ def _process_ios_max_delegate_log(line, device_id):
         if not _accept_exact_record("load_ads_ext", device_id, raw_line, provider, ad_network, ad_format, "max_delegate"):
             return
         unique_load_ads_ext.add(dedup_key)
-        _live_table_append("load_ads_ext", {
+        load_ads_ext_events.append({
             "device_id": device_id,
             "device_name": d_name,
             "provider": provider,
@@ -10633,7 +9590,8 @@ def _process_ios_max_delegate_log(line, device_id):
             "ad_format": ad_format,
             "raw_log": raw_line,
         })
-        snapshot = True
+        snapshot = list(load_ads_ext_events)
+    socketio.emit("update_load_ads_ext", snapshot)
     send_to_sheet(d_name, ad_network, ad_format, raw_line, "LoadAdsExt", provider)
 
 
@@ -10679,7 +9637,7 @@ def process_load_ads_max_log(line, device_id):
         if not _accept_exact_record("load_ads_ext", device_id, raw_line, provider, ad_network, ad_format, "max_revenue"):
             return
         unique_load_ads_ext.add(dedup_key)
-        _live_table_append("load_ads_ext", {
+        load_ads_ext_events.append({
             "device_id": device_id,
             "device_name": d_name,
             "provider": provider,
@@ -10688,7 +9646,8 @@ def process_load_ads_max_log(line, device_id):
             "ad_format": ad_format,
             "raw_log": raw_line,
         })
-        snapshot = True
+        snapshot = list(load_ads_ext_events)
+    socketio.emit("update_load_ads_ext", snapshot)
     send_to_sheet(d_name, ad_network, ad_format, raw_line, "LoadAdsExt", provider)
 
 def process_load_ads_ext_log(line, device_id):
@@ -10729,7 +9688,7 @@ def process_load_ads_ext_log(line, device_id):
                     dedup_key = (device_id, provider, ad_network, fmt, "ios_metrica")
                     if dedup_key not in unique_load_ads_ext and _accept_exact_record("load_ads_ext", device_id, raw_log or line, provider, ad_network, fmt, "ios_metrica"):
                         unique_load_ads_ext.add(dedup_key)
-                        _live_table_append("load_ads_ext", {
+                        load_ads_ext_events.append({
                             "device_id": device_id,
                             "device_name": d_name,
                             "provider": provider,
@@ -10737,8 +9696,9 @@ def process_load_ads_ext_log(line, device_id):
                             "ad_format": fmt,
                             "raw_log": raw_log or line.strip()
                         })
-                        snapshot = True
+                        snapshot = list(load_ads_ext_events)
                 if snapshot is not None:
+                    socketio.emit('update_load_ads_ext', snapshot)
                     send_to_sheet(d_name, ad_network, fmt, raw_log or line.strip(), "LoadAdsExt", provider)
             return
         except:
@@ -10765,7 +9725,7 @@ def process_load_ads_ext_log(line, device_id):
                     dedup_key = (device_id, provider, ad_network, fmt, "metrica")
                     if dedup_key not in unique_load_ads_ext and _accept_exact_record("load_ads_ext", device_id, line, provider, ad_network, fmt, "metrica"):
                         unique_load_ads_ext.add(dedup_key)
-                        _live_table_append("load_ads_ext", {
+                        load_ads_ext_events.append({
                             "device_id": device_id,
                             "device_name": d_name, 
                             "provider": provider,
@@ -10773,8 +9733,9 @@ def process_load_ads_ext_log(line, device_id):
                             "ad_format": fmt, 
                             "raw_log": line.strip()
                         })
-                        snapshot = True
+                        snapshot = list(load_ads_ext_events)
                 if snapshot is not None:
+                    socketio.emit('update_load_ads_ext', snapshot)
                     # Gửi với type "LoadAdsExt"
                     send_to_sheet(d_name, ad_network, fmt, line.strip(), "LoadAdsExt", provider)
         except: pass
@@ -11540,7 +10501,6 @@ def process_callback_and_ad_event_log(log_entry, device_id, event_name=None, act
         })
 
 def process_event_validator_log(event_name, actual_params, json_string, log_entry, device_id):
-    global validator_seq
     if is_paused or not validator_active: 
         return
     source = "firebase"
@@ -11585,202 +10545,72 @@ def process_event_validator_log(event_name, actual_params, json_string, log_entr
         
         if not _accept_exact_record("validator", device_id, log_entry, event_name, source):
             return
-        validator_seq += 1
-        row = {"device_id": device_id, "event_name": event_name, "device_name": get_device_name(device_id), "status": status, "details": details_html, "raw_log": log_entry.strip(), "json_data": json_string, "source": source, "seq": validator_seq}
-        validator_results.append(row)
-        # The UI receives only this new row (coalesced by live_table_emitter)
-        # instead of the whole table on every event.
-        validator_pending.append(row)
-
-def _build_specific_result(item):
-    """Validation row for one cached event, or None when the name filter skips it.
-
-    This is the exact per-row logic the table always used; a full rebuild and
-    a single new event now share it, so both produce identical rows.
-    """
-    try:
-        data = json.loads(item['json_data'])
-        evt = data.get('eventName')
-        params = data.get('e', {})
-
-        source = data.get('source', 'firebase')
-
-        # Name Filter
-        if specific_event_name_filters and not any(evt.startswith(f) for f in specific_event_name_filters):
-            return None
-
-        # Param Validation (Default Params + Default Events)
-        status = "INFO"
-        details = ""
-
-        required_all = []
-        required_all.extend(default_params)
-        # If user input params, combine with defaults
-        if specific_event_params_filters:
-            required_all.extend(specific_event_params_filters)
-        # Add event-specific params if event is in default event list
-        if evt in event_specific_params:
-            required_all.extend(event_specific_params.get(evt, []))
-
-        if required_all:
-            required_set = set(required_all)
-            actual_set = set(params.keys())
-            missing = sorted(required_set - actual_set)
-            strange = sorted(actual_set - required_set)
-            status = "PASSED" if not missing and not strange else "FAILED"
-
-            if missing:
-                details += format_param_issue_html("Missing", missing, "text-red-600")
-
-            if strange:
-                details += format_param_issue_html("Strange", strange, "text-orange-600")
-
-            # Show full JSON
-            details += format_json_html(params)
-        else:
-            # Show all params json
-            details = format_json_html(params)
-
-        return {"device_id": item['device_id'], "device_name": get_device_name(item['device_id']), "status": status, "event_name": evt, "details": details, "raw_log": item['log'], "json_data": item['json_data'], "source": source, "seq": item.get('seq', 0)}
-    except Exception:
-        return None
-
+        validator_results.append({"device_id": device_id, "event_name": event_name, "device_name": get_device_name(device_id), "status": status, "details": details_html, "raw_log": log_entry.strip(), "json_data": json_string, "source": source})
+        snapshot = list(validator_results)
+    socketio.emit('update_validator_table', snapshot)
 
 def _apply_specific_filter_and_emit():
-    """Rebuild every row (filters or profile changed) and send the whole table."""
-    global specific_event_results, specific_event_pending
+    global specific_event_results
     with lock:
         res = []
         for item in event_log_cache:
-            row = _build_specific_result(item)
-            if row is not None:
-                res.append(row)
+             try:
+                 data = json.loads(item['json_data'])
+                 evt = data.get('eventName')
+                 params = data.get('e', {})
+                 
+                 source = data.get('source', 'firebase')
+
+                 # Name Filter
+                 if specific_event_name_filters and not any(evt.startswith(f) for f in specific_event_name_filters):
+                     continue
+                 
+                 # Param Validation (Default Params + Default Events)
+                 status = "INFO"
+                 details = ""
+                 
+                 required_all = []
+                 required_all.extend(default_params)
+                 # If user input params, combine with defaults
+                 if specific_event_params_filters:
+                     required_all.extend(specific_event_params_filters)
+                 # Add event-specific params if event is in default event list
+                 if evt in event_specific_params:
+                     required_all.extend(event_specific_params.get(evt, []))
+
+                 if required_all:
+                     required_set = set(required_all)
+                     actual_set = set(params.keys())
+                     missing = sorted(required_set - actual_set)
+                     strange = sorted(actual_set - required_set)
+                     status = "PASSED" if not missing and not strange else "FAILED"
+                     
+                     if missing:
+                         details += format_param_issue_html("Missing", missing, "text-red-600")
+                     
+                     if strange:
+                         details += format_param_issue_html("Strange", strange, "text-orange-600")
+                     
+                     # Show full JSON
+                     details += format_json_html(params)
+                 else:
+                     # Show all params json
+                     details = format_json_html(params)
+
+                 res.append({"device_id": item['device_id'], "device_name": get_device_name(item['device_id']), "status": status, "event_name": evt, "details": details, "raw_log": item['log'], "json_data": item['json_data'], "source": source})
+             except: pass
         specific_event_results = res
-        # The full table already contains anything still waiting for a delta.
-        specific_event_pending = []
     socketio.emit('update_specific_event_table', specific_event_results)
 
-
-def _emit_specific_event_snapshot(to=None):
-    """Send the current table (rows already built) to one client.
-
-    New rows reach clients as deltas, so a page that (re)connects needs the
-    rows it missed once.  Pending rows are left for the next delta; the
-    client ignores any row it already holds.
-    """
-    with lock:
-        rows = list(specific_event_results)
-    if to is not None:
-        socketio.emit('update_specific_event_table', rows, to=to)
-    else:
-        socketio.emit('update_specific_event_table', rows)
-
-
-def _flush_specific_event_delta():
-    """Send rows added since the last flush; `min_seq` says which old rows left the cache."""
-    global specific_event_pending
-    with lock:
-        if not specific_event_pending:
-            return 0
-        rows = specific_event_pending
-        specific_event_pending = []
-        min_seq = event_log_cache[0].get('seq', 0) if event_log_cache else 0
-    socketio.emit('specific_event_delta', {"rows": rows, "min_seq": min_seq})
-    return len(rows)
-
-
-def _live_table_append(name, row):
-    """Append one row to a live table and queue it for the next UI delta.
-
-    Used by Load Ads, Load Ads Ext, Callback & Ads and Price Rotation: the
-    row keeps every field it had, plus a `seq` the UI uses to order rows and
-    to drop rows that left the table.
-    """
-    global live_table_seq
-    with lock:
-        live_table_seq += 1
-        row["seq"] = live_table_seq
-        LIVE_TABLE_ROWS[name].append(row)
-        LIVE_TABLE_PENDING[name].append(row)
-
-
-def _flush_live_table(name):
-    """Send the rows queued for one table; `min_seq` marks rows that left it."""
-    with lock:
-        rows = LIVE_TABLE_PENDING[name]
-        if not rows:
-            return 0
-        LIVE_TABLE_PENDING[name] = []
-        table = LIVE_TABLE_ROWS[name]
-        min_seq = table[0].get("seq", 0) if table else 0
-    socketio.emit(LIVE_TABLE_DELTA_EVENTS[name], {"rows": rows, "min_seq": min_seq})
-    return len(rows)
-
-
-def _clear_live_table_pending(*names):
-    with lock:
-        for name in names or LIVE_TABLE_PENDING.keys():
-            LIVE_TABLE_PENDING[name] = []
-
-
-def _flush_validator_delta():
-    """Send Validator rows added since the last flush; `min_seq` marks rows that left the table."""
-    global validator_pending
-    with lock:
-        if not validator_pending:
-            return 0
-        rows = validator_pending
-        validator_pending = []
-        min_seq = validator_results[0].get('seq', 0) if validator_results else 0
-    socketio.emit('validator_delta', {"rows": rows, "min_seq": min_seq})
-    return len(rows)
-
-
-def _emit_validator_snapshot(to=None):
-    """Send the current Validator table to one (re)connecting client."""
-    with lock:
-        rows = list(validator_results)
-    if to is not None:
-        socketio.emit('update_validator_table', rows, to=to)
-    else:
-        socketio.emit('update_validator_table', rows)
-
-
-def live_table_emitter():
-    """Coalesce live table rows (Specific Validator, Validator): one delta per interval."""
-    while True:
-        time.sleep(TABLE_DELTA_INTERVAL_SECONDS)
-        flushes = [("Specific Validator", _flush_specific_event_delta), ("Validator", _flush_validator_delta),
-                   ("Revenue", _flush_adrevenue_delta)]
-        flushes += [(name, lambda name=name: _flush_live_table(name)) for name in LIVE_TABLE_DELTA_EVENTS]
-        for name, flush in flushes:
-            try:
-                flush()
-            except Exception as exc:
-                logging.warning("%s delta failed: %s", name, exc)
-
-
 def cache_specific_event_log(event_name, params, json_string, log_entry, device_id):
-    global specific_event_seq, specific_event_results
     if is_paused: return
     with lock:
         if not _accept_exact_record("specific", device_id, log_entry, event_name):
             return
-        specific_event_seq += 1
-        item = {'log': log_entry, 'device_id': device_id, 'json_data': json_string, 'seq': specific_event_seq}
-        event_log_cache.append(item)
-        # Only the new event is validated and rendered; the rest of the table
-        # is unchanged, so the UI receives just this row.
-        row = _build_specific_result(item)
-        if row is not None:
-            specific_event_results.append(row)
-            specific_event_pending.append(row)
-        oldest_seq = event_log_cache[0].get('seq', 0)
-        if specific_event_results and specific_event_results[0].get('seq', 0) < oldest_seq:
-            specific_event_results = [r for r in specific_event_results if r.get('seq', 0) >= oldest_seq]
+        event_log_cache.append({'log': log_entry, 'device_id': device_id, 'json_data': json_string})
+    _apply_specific_filter_and_emit()
 
 def _record_adrevenue_log(device_id, source, event_name, parsed_data, raw_log, raw_details=None, raw_event_prefix=None, skip_validation=False):
-    global adrevenue_seq, adrevenue_rendered
     payload = parsed_data if isinstance(parsed_data, dict) else {}
     item = {
         "device_id": device_id,
@@ -11797,18 +10627,8 @@ def _record_adrevenue_log(device_id, source, event_name, parsed_data, raw_log, r
     }
     if raw_event_prefix:
         item["raw_event_prefix"] = raw_event_prefix
-    with lock:
-        if _accept_exact_record("adrevenue", device_id, raw_log, source, event_name, raw_event_prefix or ""):
-            adrevenue_seq += 1
-            item["seq"] = adrevenue_seq
-            adrevenue_logs.append(item)
-            # Validate and render only this item; earlier rows are unchanged.
-            row = _build_adrevenue_row(item)
-            adrevenue_rendered.append(row)
-            adrevenue_pending.append(row)
-            oldest_seq = adrevenue_logs[0].get("seq", 0)
-            if adrevenue_rendered and adrevenue_rendered[0].get("seq", 0) < oldest_seq:
-                adrevenue_rendered = [r for r in adrevenue_rendered if r.get("seq", 0) >= oldest_seq]
+    if _accept_exact_record("adrevenue", device_id, raw_log, source, event_name, raw_event_prefix or ""):
+        adrevenue_logs.append(item)
 
 def _normalize_ios_appmetrica_adrevenue(ad_revenue):
     payload = ad_revenue.get("Payload") if isinstance(ad_revenue.get("Payload"), dict) else {}
@@ -12197,143 +11017,111 @@ def process_adrevenue_log(line, device_id):
                     _record_adrevenue_log(device_id, "adjust", event_name, response_data, line, json_str, "response", skip_validation=True)
                 handled = True
 
-    # New rows were queued by _record_adrevenue_log and leave as a delta.
+    if handled:
+        _apply_adrevenue_filter_and_emit()
     return handled
 
-def _build_adrevenue_row(item):
-    """Validated Revenue row for one recorded item (the table's exact per-row logic)."""
-    parsed_data = item.get("parsed_data") or {}
-    source = (item.get("source") or "appmetrica").lower()
-
-    if source == "appsflyer":
-        ad_network = parsed_data.get("ad_network") if isinstance(parsed_data.get("ad_network"), dict) else {}
-        root_data = ad_network if ad_network else parsed_data
-        payload_data = root_data.get("payload") if isinstance(root_data.get("payload"), dict) else {}
-        custom_params = payload_data.get("custom_parameters") if isinstance(payload_data.get("custom_parameters"), dict) else {}
-        validate_maps = [root_data, payload_data, custom_params]
-        details_target = root_data if root_data else parsed_data
-    else:
-        payload_data = parsed_data.get("payload") if isinstance(parsed_data.get("payload"), dict) else {}
-        validate_maps = [parsed_data, payload_data]
-        details_target = parsed_data if parsed_data else item.get("raw_details", "")
-
-    if item.get("skip_validation"):
-        if item.get("event_name") == "Adjust Config":
-            sending_background = parsed_data.get("IsSendingInBackgroundEnabled")
-            cost_data_attr = parsed_data.get("IsCostDataInAttributionEnabled")
-            ad_services = parsed_data.get("IsAdServicesEnabled")
-            idfa_reading = parsed_data.get("IsIdfaReadingEnabled")
-            is_adjust_config_ok = (
-                sending_background is True and
-                cost_data_attr is True and
-                ad_services is True and
-                idfa_reading is True
-            )
-            return ({
-                **item,
-                "status": "PASSED" if is_adjust_config_ok else "FAILED",
-                "details": format_adjust_config_html(details_target) if isinstance(details_target, dict) else (details_target or item.get("details", "")),
-            })
-        return ({
-            **item,
-            "status": "INFO",
-            "details": format_json_html(details_target) if isinstance(details_target, dict) else (details_target or item.get("details", "")),
-        })
-
-    required_all = list(adrevenue_default_params)
-    normalized_source = _normalize_adrevenue_sheet_key(source)
-    for alias in (
-        normalized_source,
-        _normalize_adrevenue_sheet_key(item.get("event_name", "")),
-        "all",
-    ):
-        required_all.extend(adrevenue_source_params.get(alias, []))
-    seen_required = []
-    seen_set = set()
-    for param in required_all:
-        if param not in seen_set:
-            seen_set.add(param)
-            seen_required.append(param)
-
-    missing = []
-    skipped_ios = []
-    for param in seen_required:
-        if any(isinstance(m, dict) and param in m for m in validate_maps):
-            continue
-        if active_platform == "ios" and (
-            (source == "appsflyer" and param == "custom_parameters") or
-            (source == "appmetrica" and param == "autoCollected")
-        ):
-            skipped_ios.append(param)
-            continue
-        missing.append(param)
-
-    actual_keys = set()
-    for candidate in validate_maps:
-        if isinstance(candidate, dict):
-            actual_keys.update(candidate.keys())
-    strange = sorted(actual_keys - set(seen_required)) if seen_required else []
-
-    status = "INFO"
-    if seen_required:
-        status = "PASSED" if not missing else "FAILED"
-
-    summary_parts = []
-    if seen_required:
-        if missing:
-            summary_parts.append(format_param_issue_html("Missing", missing, "text-red-600", chunk_size=1))
-        else:
-            summary_parts.append("<div class='mb-2 text-xs font-medium text-green-600'>All required params found</div>")
-        if skipped_ios:
-            summary_parts.append(format_param_issue_html("Skip in iOS", skipped_ios, "text-slate-500", chunk_size=1))
-        if strange:
-            summary_parts.append(format_param_issue_html("Strange", strange, "text-orange-600", chunk_size=1))
-
-    details_html = ''.join(summary_parts) + format_json_html(details_target)
-    return ({
-        **item,
-        "status": status,
-        "details": details_html,
-    })
-
-
 def _apply_adrevenue_filter_and_emit():
-    """Rebuild every Revenue row (params or profile changed) and send the whole table."""
-    global adrevenue_rendered, adrevenue_pending
+    rendered = []
     with lock:
-        adrevenue_rendered = [_build_adrevenue_row(item) for item in adrevenue_logs]
-        rendered = list(adrevenue_rendered)
-        # The full table already contains anything still waiting for a delta.
-        adrevenue_pending = []
+        for item in adrevenue_logs:
+            parsed_data = item.get("parsed_data") or {}
+            source = (item.get("source") or "appmetrica").lower()
+
+            if source == "appsflyer":
+                ad_network = parsed_data.get("ad_network") if isinstance(parsed_data.get("ad_network"), dict) else {}
+                root_data = ad_network if ad_network else parsed_data
+                payload_data = root_data.get("payload") if isinstance(root_data.get("payload"), dict) else {}
+                custom_params = payload_data.get("custom_parameters") if isinstance(payload_data.get("custom_parameters"), dict) else {}
+                validate_maps = [root_data, payload_data, custom_params]
+                details_target = root_data if root_data else parsed_data
+            else:
+                payload_data = parsed_data.get("payload") if isinstance(parsed_data.get("payload"), dict) else {}
+                validate_maps = [parsed_data, payload_data]
+                details_target = parsed_data if parsed_data else item.get("raw_details", "")
+
+            if item.get("skip_validation"):
+                if item.get("event_name") == "Adjust Config":
+                    sending_background = parsed_data.get("IsSendingInBackgroundEnabled")
+                    cost_data_attr = parsed_data.get("IsCostDataInAttributionEnabled")
+                    ad_services = parsed_data.get("IsAdServicesEnabled")
+                    idfa_reading = parsed_data.get("IsIdfaReadingEnabled")
+                    is_adjust_config_ok = (
+                        sending_background is True and
+                        cost_data_attr is True and
+                        ad_services is True and
+                        idfa_reading is True
+                    )
+                    rendered.append({
+                        **item,
+                        "status": "PASSED" if is_adjust_config_ok else "FAILED",
+                        "details": format_adjust_config_html(details_target) if isinstance(details_target, dict) else (details_target or item.get("details", "")),
+                    })
+                    continue
+                rendered.append({
+                    **item,
+                    "status": "INFO",
+                    "details": format_json_html(details_target) if isinstance(details_target, dict) else (details_target or item.get("details", "")),
+                })
+                continue
+
+            required_all = list(adrevenue_default_params)
+            normalized_source = _normalize_adrevenue_sheet_key(source)
+            for alias in (
+                normalized_source,
+                _normalize_adrevenue_sheet_key(item.get("event_name", "")),
+                "all",
+            ):
+                required_all.extend(adrevenue_source_params.get(alias, []))
+            seen_required = []
+            seen_set = set()
+            for param in required_all:
+                if param not in seen_set:
+                    seen_set.add(param)
+                    seen_required.append(param)
+
+            missing = []
+            skipped_ios = []
+            for param in seen_required:
+                if any(isinstance(m, dict) and param in m for m in validate_maps):
+                    continue
+                if active_platform == "ios" and (
+                    (source == "appsflyer" and param == "custom_parameters") or
+                    (source == "appmetrica" and param == "autoCollected")
+                ):
+                    skipped_ios.append(param)
+                    continue
+                missing.append(param)
+
+            actual_keys = set()
+            for candidate in validate_maps:
+                if isinstance(candidate, dict):
+                    actual_keys.update(candidate.keys())
+            strange = sorted(actual_keys - set(seen_required)) if seen_required else []
+
+            status = "INFO"
+            if seen_required:
+                status = "PASSED" if not missing else "FAILED"
+
+            summary_parts = []
+            if seen_required:
+                if missing:
+                    summary_parts.append(format_param_issue_html("Missing", missing, "text-red-600", chunk_size=1))
+                else:
+                    summary_parts.append("<div class='mb-2 text-xs font-medium text-green-600'>All required params found</div>")
+                if skipped_ios:
+                    summary_parts.append(format_param_issue_html("Skip in iOS", skipped_ios, "text-slate-500", chunk_size=1))
+                if strange:
+                    summary_parts.append(format_param_issue_html("Strange", strange, "text-orange-600", chunk_size=1))
+
+            details_html = ''.join(summary_parts) + format_json_html(details_target)
+            rendered.append({
+                **item,
+                "status": status,
+                "details": details_html,
+            })
+
     socketio.emit('update_adrevenue_table', rendered)
-
-
-def _flush_adrevenue_delta():
-    """Send Revenue rows added since the last flush; `min_seq` marks rows that left the table."""
-    global adrevenue_pending
-    with lock:
-        if not adrevenue_pending:
-            return 0
-        rows = adrevenue_pending
-        adrevenue_pending = []
-        min_seq = adrevenue_logs[0].get("seq", 0) if adrevenue_logs else 0
-    socketio.emit('adrevenue_delta', {"rows": rows, "min_seq": min_seq})
-    return len(rows)
-
-
-def _emit_live_table_snapshots(to):
-    """Full tables for one (re)connecting client; new rows then arrive as deltas."""
-    with lock:
-        payloads = [
-            ('update_load_ads', list(load_ads_events)),
-            ('update_load_ads_ext', list(load_ads_ext_events)),
-            ('update_callback_ad_table', list(callback_ad_logs)),
-            ('update_price_rotation_table', list(price_rotation_logs)),
-            ('update_adrevenue_table', list(adrevenue_rendered)),
-        ]
-    for event, rows in payloads:
-        socketio.emit(event, rows, to=to)
-
 
 def _sdk_result_group_sort_key(rows):
     statuses = {row.get("status") for row in rows if row.get("status")}
@@ -13513,13 +12301,13 @@ def _reset_runtime_for_platform_switch():
 
         load_ads_events.clear(); unique_load_ads.clear()
         load_ads_ext_events.clear(); unique_load_ads_ext.clear()
-        validator_results.clear(); validator_pending.clear()
+        validator_results.clear()
         default_ad_event_hits.clear()
         default_ad_event_simple_hits.clear()
         specific_event_name_filters = []
         specific_event_params_filters = []
-        specific_event_results.clear(); specific_event_pending.clear(); event_log_cache.clear()
-        adrevenue_logs.clear(); adrevenue_rendered.clear(); adrevenue_pending.clear(); _clear_live_table_pending(); adrevenue_log_cache.clear()
+        specific_event_results.clear(); event_log_cache.clear()
+        adrevenue_logs.clear(); adrevenue_log_cache.clear()
         callback_ad_logs.clear(); incomplete_impression_logs.clear(); incomplete_ios_adrevenue_logs.clear(); incomplete_ios_load_ads_ext_logs.clear(); incomplete_ios_max_load_ads_logs.clear(); incomplete_ios_event_logs.clear(); incomplete_android_event_logs.clear(); incomplete_adjust_adrevenue_logs.clear()
         price_rotation_logs.clear()
         package_log_cache.clear(); active_package_pids.clear(); active_ios_package_log_buffers.clear(); active_ios_package_log_frame_buffers.clear(); active_ios_package_log_stream_modes.clear()
@@ -13632,11 +12420,11 @@ def cl():
     with lock:
         load_ads_events.clear(); unique_load_ads.clear()
         load_ads_ext_events.clear(); unique_load_ads_ext.clear()
-        validator_results.clear(); validator_pending.clear()
+        validator_results.clear()
         default_ad_event_hits.clear()
         default_ad_event_simple_hits.clear()
-        specific_event_results.clear(); specific_event_pending.clear(); event_log_cache.clear()
-        adrevenue_logs.clear(); adrevenue_rendered.clear(); adrevenue_pending.clear(); _clear_live_table_pending(); callback_ad_logs.clear(); price_rotation_logs.clear()
+        specific_event_results.clear(); event_log_cache.clear()
+        adrevenue_logs.clear(); callback_ad_logs.clear(); price_rotation_logs.clear()
         package_log_cache.clear()
         # Clean SDK check
         sdk_check_active = False
@@ -13697,7 +12485,7 @@ def val(p):
     global required_params, validator_active
     required_params = p or []
     validator_active = True
-    validator_results.clear(); validator_pending.clear()
+    validator_results.clear()
     _clear_record_dedup("validator")
     socketio.emit('update_validator_table', [])
     socketio.emit('validator_status', {'active': True})
@@ -13887,18 +12675,12 @@ def refresh():
     socketio.emit('update_default_ad_events', _default_ad_event_payload())
     socketio.emit('update_callback_ad_table', list(callback_ad_logs)) # Ensure callback data is refreshed
     socketio.emit('update_price_rotation_table', list(price_rotation_logs))
-    _emit_specific_event_snapshot(to=request.sid)
-    _emit_validator_snapshot(to=request.sid)
-    _emit_live_table_snapshots(request.sid)
     # ... trigger others ...
 
 @socketio.on('connect')
 def connect(): 
     with lock:
         default_ad_event_clients.add(request.sid)
-    _emit_specific_event_snapshot(to=request.sid)
-    _emit_validator_snapshot(to=request.sid)
-    _emit_live_table_snapshots(request.sid)
     socketio.emit('pause_status', {'is_paused': is_paused})
     socketio.emit('validator_status', {'active': validator_active})
     socketio.emit('platform_status', {'platform': active_platform})
@@ -13932,7 +12714,6 @@ def run_server(host="0.0.0.0", port=5008):
     threading.Thread(target=device_manager, daemon=True).start()
     threading.Thread(target=android_installation_id_monitor, daemon=True).start()
     threading.Thread(target=package_log_emitter, daemon=True).start()
-    threading.Thread(target=live_table_emitter, daemon=True).start()
     threading.Thread(target=package_pid_monitor, daemon=True).start()
     threading.Thread(target=_package_log_db_writer, daemon=True).start()
     threading.Thread(target=_package_log_maintenance_loop, daemon=True).start()

@@ -44,13 +44,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-10-21-1-2.5.0-77"
-CURRENT_RELEASE_BUILD = 77
+CURRENT_RELEASE_VERSION = "2026-10-20-3-2.5.0-76"
+CURRENT_RELEASE_BUILD = 76
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 77
+RELEASE_SOURCE_BUILD = 78
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -1834,410 +1834,6 @@ def test_package_log_compact_api() -> None:
         _assert_equal(rows, 50, "compact changed the stored rows")
 
 
-class _SpecificStateGuard:
-    """Snapshot and restore Specific Validator globals; capture its emits."""
-
-    NAMES = (
-        "specific_event_results", "specific_event_pending", "specific_event_seq",
-        "specific_event_name_filters", "specific_event_params_filters", "is_paused", "active_platform",
-    )
-
-    def __enter__(self):
-        self.values = {name: getattr(lc, name) for name in self.NAMES}
-        self.cache = list(lc.event_log_cache)
-        self.dedup_seen = set(lc.record_dedup_seen["specific"])
-        self.dedup_order = list(lc.record_dedup_order["specific"])
-        self.emit = lc.socketio.emit
-        self.emitted = []
-        lc.socketio.emit = lambda event, payload=None, **kw: self.emitted.append((event, payload, kw.get("to")))
-        lc.event_log_cache.clear()
-        lc._clear_record_dedup("specific")
-        lc.specific_event_results = []
-        lc.specific_event_pending = []
-        lc.is_paused = False
-        lc.active_platform = "android"
-        return self
-
-    def __exit__(self, *exc):
-        lc.socketio.emit = self.emit
-        for name, value in self.values.items():
-            setattr(lc, name, value)
-        lc.event_log_cache.clear()
-        lc.event_log_cache.extend(self.cache)
-        lc.record_dedup_seen["specific"].clear()
-        lc.record_dedup_seen["specific"].update(self.dedup_seen)
-        lc.record_dedup_order["specific"].clear()
-        lc.record_dedup_order["specific"].extend(self.dedup_order)
-        return False
-
-    def events(self, name):
-        return [payload for event, payload, _to in self.emitted if event == name]
-
-
-def _feed_specific_events(count, start=0):
-    params = {f"param_{k}": f"value_{k}" for k in range(8)}
-    for index in range(start, start + count):
-        name = "ad_load" if index % 3 else "session_start_customs"
-        line = (
-            f"Oct 20 16:43:{index % 60:02d} iPhone-12 TrainIdle(UnityFramework)[5706] <Notice>: [Tracking] "
-            "TrackingService->Track: " + json.dumps({"EventName": name, "params": dict(params, seq=index)})
-        )
-        event_name, event_params, json_string = lc.find_and_parse_event(line)
-        lc.cache_specific_event_log(event_name, event_params, json_string, line, "ios-device")
-
-
-def test_specific_validator_delta_matches_full_rebuild() -> None:
-    """Rows sent as deltas must be exactly the rows a full rebuild produces.
-
-    Same validation, same formatted JSON HTML and the untouched raw log, so
-    the parsed-JSON column can still be compared with the raw log column.
-    """
-    with _SpecificStateGuard() as guard:
-        lc.specific_event_name_filters = ["ad_", "session_"]
-        lc.specific_event_params_filters = []
-        total = lc.event_log_cache.maxlen + 120
-        delta_rows = []
-        min_seq = 0
-        for chunk_start in range(0, total, 97):
-            _feed_specific_events(min(97, total - chunk_start), start=chunk_start)
-            _assert(not guard.events("update_specific_event_table"), "a new event must not resend the whole table")
-            lc._flush_specific_event_delta()
-        for payload in guard.events("specific_event_delta"):
-            delta_rows.extend(payload["rows"])
-            min_seq = payload["min_seq"]
-        kept_delta_rows = [row for row in delta_rows if row["seq"] >= min_seq]
-
-        guard.emitted.clear()
-        lc._apply_specific_filter_and_emit()
-        full_rows = guard.events("update_specific_event_table")[-1]
-        _assert_equal(len(full_rows), lc.event_log_cache.maxlen, "full rebuild row count changed")
-        _assert_equal(kept_delta_rows, full_rows, "delta rows differ from the full rebuild rows")
-        _assert_equal(lc.specific_event_results, full_rows, "incremental server table differs from a rebuild")
-        _assert_equal(min_seq, lc.event_log_cache[0]["seq"], "delta must report the oldest cached row")
-        raw_by_seq = {item["seq"]: item["log"] for item in lc.event_log_cache}
-        _assert(all(row["raw_log"] == raw_by_seq[row["seq"]] for row in full_rows), "raw log must stay byte-identical")
-        _assert(all("json-" in row["details"] or "<" in row["details"] for row in full_rows), "formatted JSON column missing")
-
-
-def test_specific_validator_filters_clear_and_snapshot() -> None:
-    with _SpecificStateGuard() as guard:
-        lc.specific_event_name_filters = ["ad_"]
-        _feed_specific_events(30)
-        _assert(all(row["event_name"].startswith("ad_") for row in lc.specific_event_pending), "name filter not applied to new rows")
-        lc.specific_event_name_filters = ["session_"]
-        lc._apply_specific_filter_and_emit()
-        _assert_equal(lc.specific_event_pending, [], "a full rebuild must absorb pending rows")
-        full = guard.events("update_specific_event_table")[-1]
-        _assert(full and all(row["event_name"].startswith("session_") for row in full), "filter change did not rebuild")
-        _assert_equal(lc._flush_specific_event_delta(), 0, "rows inside the rebuild were sent again")
-
-        guard.emitted.clear()
-        with lc.app.test_request_context("/"):
-            lc.request.sid = "harness-sid"
-            lc.refresh()
-        snapshot = [(payload, to) for event, payload, to in guard.emitted if event == "update_specific_event_table"]
-        _assert(snapshot and snapshot[-1][1] == "harness-sid", "refresh must send the current table to that client")
-        _assert_equal(snapshot[-1][0], lc.specific_event_results, "refresh snapshot differs from the server table")
-
-        _feed_specific_events(5, start=100)
-        lc.cl() if hasattr(lc, "cl") else None
-        _assert_equal((lc.specific_event_pending, list(lc.event_log_cache)), ([], []), "Clear must drop pending rows")
-
-
-def test_specific_validator_delta_ui_contract() -> None:
-    html = lc.app.test_client().get("/").get_data(as_text=True)
-    for needle in (
-        "function createLiveTable(opts)",
-        "tbody.innerHTML = filtered.map(opts.rowHtml).join('');",
-        "tbody.insertAdjacentHTML('beforeend', appendRows.map(opts.rowHtml).join(''));",
-        "var LIVE_TABLE_LARGE_INTERVAL_MS = 1000;",
-        "function specificRowHtml(res)",
-        "socket.on('specific_event_delta', (payload) => specificLive.applyDelta(payload));",
-        "if (tabName === 'Specific' && specificLive) specificLive.onTabShown();",
-    ):
-        _assert(needle in html, f"Specific Validator delta UI contract missing: {needle}")
-    row_template = html.split("function specificRowHtml(res) {", 1)[1].split("`;", 1)[0]
-    for column in ('class="py-2 px-3 details-cell text-sm">${res.details}</td>',
-                   "${escapeHTML(res.raw_log || '')}",
-                   "data-json='${escapeAttribute(res.json_data)}'>View JSON</button>"):
-        _assert(column in row_template, f"Specific row template lost a column: {column}")
-
-
-class _ValidatorStateGuard:
-    NAMES = ("validator_pending", "validator_seq", "validator_active", "is_paused", "active_platform",
-             "default_params", "required_params")
-
-    def __enter__(self):
-        self.values = {name: getattr(lc, name) for name in self.NAMES}
-        self.rows = list(lc.validator_results)
-        self.dedup_seen = set(lc.record_dedup_seen["validator"])
-        self.dedup_order = list(lc.record_dedup_order["validator"])
-        self.emit = lc.socketio.emit
-        self.emitted = []
-        lc.socketio.emit = lambda event, payload=None, **kw: self.emitted.append((event, payload, kw.get("to")))
-        lc.validator_results.clear()
-        lc._clear_record_dedup("validator")
-        lc.validator_pending = []
-        lc.validator_active = True
-        lc.is_paused = False
-        lc.active_platform = "android"
-        return self
-
-    def __exit__(self, *exc):
-        lc.socketio.emit = self.emit
-        for name, value in self.values.items():
-            setattr(lc, name, value)
-        lc.validator_results.clear()
-        lc.validator_results.extend(self.rows)
-        lc.record_dedup_seen["validator"].clear()
-        lc.record_dedup_seen["validator"].update(self.dedup_seen)
-        lc.record_dedup_order["validator"].clear()
-        lc.record_dedup_order["validator"].extend(self.dedup_order)
-        return False
-
-    def events(self, name):
-        return [payload for event, payload, _to in self.emitted if event == name]
-
-
-def test_validator_delta_matches_server_table() -> None:
-    """Validator rows reach the UI once, unchanged, in order; old rows are reported by min_seq."""
-    with _ValidatorStateGuard() as guard:
-        lc.default_params = ["param_0", "missing_param"]
-        total = lc.validator_results.maxlen + 150
-        sent = []
-        min_seq = 0
-        params = {f"param_{k}": f"value_{k}" for k in range(8)}
-        for index in range(total):
-            line = (
-                f"Oct 20 16:43:{index % 60:02d} iPhone-12 TrainIdle(UnityFramework)[5706] <Notice>: [Tracking] "
-                "TrackingService->Track: " + json.dumps({"EventName": "session_start_customs", "params": dict(params, seq=index)})
-            )
-            event_name, event_params, json_string = lc.find_and_parse_event(line)
-            lc.process_event_validator_log(event_name, event_params, json_string, line, "ios-device")
-            if index % 113 == 0:
-                lc._flush_validator_delta()
-        lc._flush_validator_delta()
-        _assert(not guard.events("update_validator_table"), "a new event must not resend the whole Validator table")
-        for payload in guard.events("validator_delta"):
-            sent.extend(payload["rows"])
-            min_seq = payload["min_seq"]
-        kept = [row for row in sent if row["seq"] >= min_seq]
-        _assert_equal(kept, list(lc.validator_results), "Validator deltas differ from the server table")
-        _assert_equal(min_seq, lc.validator_results[0]["seq"], "delta must report the oldest kept row")
-        _assert(all("Missing" in row["details"] and row["status"] == "FAILED" for row in kept), "validation result changed")
-        _assert(all(row["raw_log"].startswith("Oct 20 16:43:") for row in kept), "raw log column changed")
-
-        guard.emitted.clear()
-        with lc.app.test_request_context("/"):
-            lc.request.sid = "harness-sid"
-            lc.refresh()
-        snapshot = [(payload, to) for event, payload, to in guard.emitted if event == "update_validator_table"]
-        _assert(snapshot and snapshot[-1][1] == "harness-sid", "refresh must send the Validator table to that client")
-        _assert_equal(snapshot[-1][0], list(lc.validator_results), "refresh snapshot differs from the server table")
-
-        lc.validator_pending.append({"seq": -1})
-        lc.cl()
-        _assert_equal((lc.validator_pending, list(lc.validator_results)), ([], []), "Clear must drop pending Validator rows")
-
-
-def test_validator_delta_ui_contract() -> None:
-    html = lc.app.test_client().get("/").get_data(as_text=True)
-    for needle in (
-        "function validatorRowHtml(res)",
-        "function renderValidatorTable(results) {",
-        "validatorLive.renderFull(results);",
-        "if (validatorLive.applyDelta(payload)) updateDefaultEventStatus(validator_results_cache);",
-        "validatorLive.setAll(validator_results_cache);",
-        "if (tabName === 'Validator' && validatorLive) validatorLive.onTabShown();",
-        "if (el.textContent !== text) el.textContent = text;",
-        "function removeLeadingRows(tbody, count) {",
-    ):
-        _assert(needle in html, f"Validator delta UI contract missing: {needle}")
-    row_template = html.split("function validatorRowHtml(res) {", 1)[1].split("`;", 1)[0]
-    for column in ("${res.details}", "${escapeHTML(res.raw_log || '')}", "View JSON"):
-        _assert(column in row_template, f"Validator row template lost a column: {column}")
-
-
-class _LiveTablesGuard:
-    """Snapshot/restore the Revenue and live-table globals; capture emits."""
-
-    def __enter__(self):
-        self.tables = {name: list(rows) for name, rows in lc.LIVE_TABLE_ROWS.items()}
-        self.adrevenue = list(lc.adrevenue_logs)
-        self.values = {name: getattr(lc, name) for name in (
-            "adrevenue_rendered", "adrevenue_pending", "adrevenue_seq", "live_table_seq",
-            "adrevenue_default_params", "adrevenue_source_params", "active_platform", "is_paused")}
-        self.pending = {name: list(rows) for name, rows in lc.LIVE_TABLE_PENDING.items()}
-        self.dedup = {name: (set(lc.record_dedup_seen[name]), list(lc.record_dedup_order[name])) for name in ("adrevenue",)}
-        self.emit = lc.socketio.emit
-        self.emitted = []
-        lc.socketio.emit = lambda event, payload=None, **kw: self.emitted.append((event, payload, kw.get("to")))
-        for rows in lc.LIVE_TABLE_ROWS.values():
-            rows.clear()
-        lc.adrevenue_logs.clear()
-        lc.adrevenue_rendered = []
-        lc.adrevenue_pending = []
-        lc._clear_live_table_pending()
-        lc._clear_record_dedup("adrevenue")
-        lc.active_platform = "android"
-        lc.is_paused = False
-        return self
-
-    def __exit__(self, *exc):
-        lc.socketio.emit = self.emit
-        for name, rows in self.tables.items():
-            lc.LIVE_TABLE_ROWS[name].clear()
-            lc.LIVE_TABLE_ROWS[name].extend(rows)
-        lc.adrevenue_logs.clear()
-        lc.adrevenue_logs.extend(self.adrevenue)
-        for name, value in self.values.items():
-            setattr(lc, name, value)
-        for name, rows in self.pending.items():
-            lc.LIVE_TABLE_PENDING[name] = rows
-        for name, (seen, order) in self.dedup.items():
-            lc.record_dedup_seen[name].clear()
-            lc.record_dedup_seen[name].update(seen)
-            lc.record_dedup_order[name].clear()
-            lc.record_dedup_order[name].extend(order)
-        return False
-
-    def events(self, name):
-        return [payload for event, payload, _to in self.emitted if event == name]
-
-
-def test_revenue_delta_matches_full_rebuild() -> None:
-    """Revenue rows built one at a time equal a full rebuild, row for row."""
-    with _LiveTablesGuard() as guard:
-        lc.adrevenue_default_params = ["adRevenue", "currency", "missing_param"]
-        lc.adrevenue_source_params = {"appsflyer": ["custom_parameters"]}
-        total = lc.adrevenue_logs.maxlen + 75
-        for index in range(total):
-            kind = index % 4
-            raw = f"Oct 21 09:00:{index % 60:02d} iPhone-12 TrainIdle[5706] <Notice>: revenue row {index}"
-            if kind == 0:
-                lc._record_adrevenue_log("ios-device", "appmetrica", "ad_revenue",
-                                         {"adRevenue": index, "currency": "USD", "payload": {"x": index}}, raw)
-            elif kind == 1:
-                lc._record_adrevenue_log("ios-device", "appsflyer", "af_ad_revenue",
-                                         {"ad_network": {"payload": {"custom_parameters": {"k": index}}}}, raw)
-            elif kind == 2:
-                lc._record_adrevenue_log("ios-device", "adjust", "Adjust adrevenue", {"revenue": index}, raw,
-                                         json.dumps({"revenue": index}), "response", skip_validation=True)
-            else:
-                lc._record_adrevenue_log("ios-device", "adjust", "Adjust Config",
-                                         {"IsSendingInBackgroundEnabled": True, "IsCostDataInAttributionEnabled": index % 8 == 3,
-                                          "IsAdServicesEnabled": True, "IsIdfaReadingEnabled": True}, raw, skip_validation=True)
-            if index % 211 == 0:
-                lc._flush_adrevenue_delta()
-        lc._flush_adrevenue_delta()
-        _assert(not guard.events("update_adrevenue_table"), "a new Revenue row must not resend the whole table")
-        sent = [row for payload in guard.events("adrevenue_delta") for row in payload["rows"]]
-        min_seq = guard.events("adrevenue_delta")[-1]["min_seq"]
-        kept = [row for row in sent if row["seq"] >= min_seq]
-        guard.emitted.clear()
-        lc._apply_adrevenue_filter_and_emit()
-        full = guard.events("update_adrevenue_table")[-1]
-        _assert_equal(len(full), lc.adrevenue_logs.maxlen, "Revenue rebuild row count changed")
-        _assert_equal(kept, full, "Revenue delta rows differ from a full rebuild")
-        _assert_equal(lc.adrevenue_rendered, full, "server Revenue table differs from a full rebuild")
-        _assert_equal({row["status"] for row in full}, {"PASSED", "FAILED", "INFO"}, "Revenue statuses not exercised")
-
-
-def test_live_tables_delta_snapshot_and_clear() -> None:
-    """Load Ads, Load Ads Ext, Callback and Price Rotation send new rows only, unchanged and in order."""
-    with _LiveTablesGuard() as guard:
-        for name, rows in lc.LIVE_TABLE_ROWS.items():
-            total = rows.maxlen + 40
-            for index in range(total):
-                lc._live_table_append(name, {"device_id": "dev", "device_name": "Dev", "raw_log": f"{name} raw {index}",
-                                             "type": "Ad Event", "event_name": "onAdLoadFailed", "ad_format": "interstitial"})
-                if index % 157 == 0:
-                    lc._flush_live_table(name)
-            lc._flush_live_table(name)
-            deltas = guard.events(lc.LIVE_TABLE_DELTA_EVENTS[name])
-            sent = [row for payload in deltas for row in payload["rows"]]
-            kept = [row for row in sent if row["seq"] >= deltas[-1]["min_seq"]]
-            _assert_equal(kept, list(rows), f"{name} deltas differ from the server table")
-            _assert_equal(len(sent), total, f"{name} lost or repeated a row")
-        _assert(not any(event.startswith("update_") for event, _p, _t in guard.emitted), "a new row must not resend a whole table")
-
-        guard.emitted.clear()
-        with lc.app.test_request_context("/"):
-            lc.request.sid = "harness-sid"
-            lc.refresh()
-        snapshots = {event: (payload, to) for event, payload, to in guard.emitted
-                     if event in ("update_load_ads", "update_load_ads_ext", "update_callback_ad_table",
-                                  "update_price_rotation_table", "update_adrevenue_table") and to == "harness-sid"}
-        _assert_equal(len(snapshots), 5, "refresh must send every live table to that client")
-        _assert_equal(snapshots["update_callback_ad_table"][0], list(lc.callback_ad_logs), "callback snapshot differs")
-
-        lc._live_table_append("callback", {"device_id": "dev", "raw_log": "pending row"})
-        lc.cl()
-        _assert(not any(lc.LIVE_TABLE_PENDING.values()), "Clear must drop pending live-table rows")
-
-
-def test_live_tables_ui_contract() -> None:
-    html = lc.app.test_client().get("/").get_data(as_text=True)
-    for needle in (
-        "var adRevenueLive = createLiveTable({",
-        "var callbackLive = createLiveTable({",
-        "var priceRotationLive = createLiveTable({",
-        "var loadAdsLive = simpleTableLive('loadAdsTableBody', 'tabContentLoadAds'",
-        "var loadAdsExtLive = simpleTableLive('loadAdsExtTableBody', 'tabContentLoadAdsExt'",
-        "socket.on('adrevenue_delta', (payload) => adRevenueLive.applyDelta(payload));",
-        "socket.on('callback_ad_delta', (payload) => callbackLive.applyDelta(payload));",
-        "socket.on('price_rotation_delta', (payload) => priceRotationLive.applyDelta(payload));",
-        "socket.on('load_ads_delta', (payload) => loadAdsLive.applyDelta(payload));",
-        "socket.on('load_ads_ext_delta', (payload) => loadAdsExtLive.applyDelta(payload));",
-        "if (tabName === 'AdRevenue' && adRevenueLive) adRevenueLive.onTabShown();",
-        "if (tabName === 'LoadAdsExt' && loadAdsExtLive) loadAdsExtLive.onTabShown();",
-        "const visible = opts.makeFilter ? opts.makeFilter() : opts.visible;",
-    ):
-        _assert(needle in html, f"live-table UI contract missing: {needle}")
-    for fn, columns in (
-        ("function adRevenueRowHtml(res) {", ("${res.details}", "escapeHTML(res.raw_log", "View JSON")),
-        ("function callbackRowHtml(res) {", ("escapeHTML(res.raw_log", "View JSON")),
-        ("function priceRotationRowHtml(res) {", ("escapeHTML(res.details || '')", "escapeHTML(res.raw_log || '')")),
-    ):
-        template = html.split(fn, 1)[1].split("\n        }", 1)[0]
-        for column in columns:
-            _assert(column in template, f"{fn} lost a column: {column}")
-
-
-def test_ui_zoom_setting_contract() -> None:
-    """Text zoom is saved server-side and rendered into the page; 100% keeps the old size."""
-    original_data_dir = os.environ.get("EVENTINSPECTOR_DATA_DIR")
-    with tempfile.TemporaryDirectory() as temp_dir:
-        os.environ["EVENTINSPECTOR_DATA_DIR"] = temp_dir
-        try:
-            client = lc.app.test_client()
-            html = client.get("/").get_data(as_text=True)
-            _assert('data-ui-zoom="1.0" style="font-size: 16.0px;"' in html, "default zoom must keep the 16px base size")
-            for needle in ('id="uiZoomOut"', 'id="uiZoomReset"', 'id="uiZoomIn"', "function stepUiZoom(direction)",
-                           "fetch('/api/ui-settings'", "if (e.key === '-' || e.key === '_')"):
-                _assert(needle in html, f"zoom UI contract missing: {needle}")
-            _assert_equal(client.post("/api/ui-settings", json={"zoom": 0.33}).status_code, 400, "zoom outside the levels must be refused")
-            _assert_equal(client.post("/api/ui-settings", json={"zoom": "x"}).status_code, 400, "non-numeric zoom must be refused")
-            _assert('<div id="appHeader" class="bg-white rounded-xl shadow-md p-4 mb-4 flex-shrink-0">' in html, "header must be visible by default")
-            _assert('>Hide Top</button>' in html and "function applyTopHidden(hidden)" in html, "Hide Top toggle is missing")
-            _assert_equal(client.post("/api/ui-settings", json={"zoom": 0.85}).get_json(), {"ok": True, "zoom": 0.85, "hide_top": False}, "zoom was not saved")
-            _assert_equal(client.post("/api/ui-settings", json={"hide_top": "yes"}).status_code, 400, "non-boolean hide_top must be refused")
-            _assert_equal(client.post("/api/ui-settings", json={}).status_code, 400, "an empty settings update must be refused")
-            _assert_equal(client.post("/api/ui-settings", json={"hide_top": True}).get_json(), {"ok": True, "zoom": 0.85, "hide_top": True}, "hide_top must save without resetting zoom")
-            html = client.get("/").get_data(as_text=True)
-            _assert('data-ui-zoom="0.85" style="font-size: 13.6px;"' in html, "saved zoom is not rendered into the page")
-            _assert('flex-shrink-0 hidden">' in html and '>Show Top</button>' in html, "saved hide_top is not rendered into the page")
-            with open(os.path.join(temp_dir, "ui_settings.json"), "w", encoding="utf-8") as handle:
-                handle.write("{broken")
-            html = client.get("/").get_data(as_text=True)
-            _assert('data-ui-zoom="1.0"' in html, "a broken settings file must fall back to 100%")
-        finally:
-            if original_data_dir is None:
-                os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
-            else:
-                os.environ["EVENTINSPECTOR_DATA_DIR"] = original_data_dir
-
-
 def test_package_log_delta_ui_contract() -> None:
     html = lc.app.test_client().get("/").get_data(as_text=True)
     for needle in (
@@ -2483,13 +2079,6 @@ def test_ios_package_log_tidevice_newline_stream_does_not_merge_kernel() -> None
         lc.active_ios_package_log_stream_modes.update(original_modes)
 
 
-def _live_rows_sent(emitted, table):
-    """Rows a live table delivered to the UI: flush its queue, then read the deltas."""
-    lc._flush_live_table(table)
-    event = lc.LIVE_TABLE_DELTA_EVENTS[table]
-    return [row for name, payload in emitted if name == event for row in payload["rows"]]
-
-
 def test_ios_max_load_ads_from_package_frame_contract() -> None:
     """A complete tidevice package frame must also feed the MAX Load Ads parser."""
     original_platform = lc.active_platform
@@ -2517,7 +2106,6 @@ def test_ios_max_load_ads_from_package_frame_contract() -> None:
         lc.active_ios_package_log_frame_buffers.clear()
         lc.incomplete_ios_max_load_ads_logs.clear()
         lc.socketio.emit = lambda event, payload: emitted.append((event, payload))
-        lc._clear_live_table_pending()
         lc.send_to_sheet = lambda *args: sheet_rows.append(args)
 
         frame = (
@@ -2536,7 +2124,7 @@ def test_ios_max_load_ads_from_package_frame_contract() -> None:
         _assert_equal(len(rows), 1, "complete tidevice MAX frame was not recorded in Load Ads")
         _assert_equal(rows[0].get("ad_network"), "CHARTBOOST_NETWORK", "package-frame MAX network was not parsed")
         _assert_equal(rows[0].get("ad_format"), "BANNER", "package-frame MAX format was not parsed")
-        _assert_equal(len(_live_rows_sent(emitted, "load_ads_ext")), 1, "package-frame MAX row was not emitted")
+        _assert_equal(len(emitted), 1, "package-frame MAX row was not emitted")
         _assert_equal(sheet_rows[0][4:], ("LoadAdsExt", "MAX"), "package-frame MAX sheet target was wrong")
     finally:
         lc.active_platform = original_platform
@@ -3229,297 +2817,15 @@ def test_preset_revert_protection_contract() -> None:
 
 
 def test_rewarded_bidding_filter_contract() -> None:
-    """Package Log quick filters: separate Android/iOS lists, each filter = Tag / Message 1 / Message 2 boxes."""
     source_text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
-    expected_names = ["Integrationhelper", "Appmetrica", "Adjust", "Bidding", "Applovinsdk", "Event tracking", "Ads Event"]
-    for platform in ("android", "ios"):
-        defaults = lc.DEFAULT_PACKAGE_QUICK_FILTERS[platform]
-        _assert_equal([f["name"] for f in defaults], expected_names, f"{platform} default quick filters changed")
-        bidding = next(f for f in defaults if f["id"] == "bidding")
-        _assert_equal((bidding["tag"], bidding["message1"], bidding["message2"]), ("", "[ad,", "bidding"), f"{platform} Bidding must be Message 1 [ad, + Message 2 bidding")
-        ads = next(f for f in defaults if f["id"] == "ads_event")
-        _assert_equal((ads["tag"], ads["message1"], ads["message2"]), ("", "TrackingService->Track:", '"EventName":"ad'), f"{platform} Ads Event default is wrong")
-        tracking = next(f for f in defaults if f["id"] == "event_tracking")
-        _assert_equal((tracking["message1"], tracking["message2"]), ("TrackingService->Track:", '"EventName":"'), f"{platform} Event tracking default is wrong")
-        _assert(not lc._validate_package_quick_filters([dict(f) for f in defaults], platform)[1], f"{platform} defaults must pass validation")
-        applovin = next(f for f in defaults if f["id"] == "applovinsdk")
-        _assert_equal((applovin["tag"], applovin["message1"]), ("", "applovinsdk"), f"{platform} Applovinsdk must search the whole log")
-    _assert(all(f["tag"] == "" for f in lc.DEFAULT_PACKAGE_QUICK_FILTERS["ios"]), "iOS defaults must not use the tag")
-    _assert_equal(next(f for f in lc.DEFAULT_PACKAGE_QUICK_FILTERS["android"] if f["id"] == "adjust")["tag"], "adjust", "Android Adjust must filter by tag")
-    _assert_equal(next(f for f in lc.DEFAULT_PACKAGE_QUICK_FILTERS["ios"] if f["id"] == "adjust")["message1"], "adjust]", "iOS Adjust must search adjust]")
+    needle = 'data-message-needle="[Ad,RewardedBidding"'
+    _assert(source_text.count('value="rewarded_bidding"') == 1, "RewardedBidding filter must exist exactly once")
     _assert(source_text.count('value="rewardedcap"') == 1, "RewardedCap filter must exist exactly once")
-    _assert("case_sensitive" not in source_text and "caseSensitive" not in source_text, "quick filters have no case-sensitive option")
-    for needle in (
-        'id="packageQuickFilterList"', 'id="editPackageQuickFiltersBtn"', 'id="packageQuickFilterEditor"', 'id="packageHistoryQuickFilter"',
-        'id="packageQuickFilterEditorPlatform"', 'class="qf-tag-col',
-        'id="exportPackageQuickFiltersBtn"', 'id="importPackageQuickFiltersBtn"', 'id="packageQuickFilterImportInput"',
-        "fetch('/api/package-quick-filters/export'", "fetch('/api/package-quick-filters/import'",
-        'mb-1">Filter 1:</label>', 'mb-1">Filter 2:</label>', 'border-b">Filter 1</th>', 'border-b">Filter 2</th>',
-        "var packageQuickFilters = {{ package_quick_filters|tojson }};",
-        "return (packageQuickFilters && packageQuickFilters[quickFilterPlatform()]) || [];",
-        "if (quick.tag && !tagHaystack.includes(quick.tag)) return false;",
-        "if (quick.terms.some(term => !logHaystack.includes(term))) return false;",
-        "const norm = text => String(text || '').trim().toLowerCase();",
-        "state.filterText && !logHaystack.includes(state.filterText)",
-        "state.filterText2 && !logHaystack.includes(state.filterText2)",
-        "body: JSON.stringify({ platform, filters }),",
-        "qf: quickId,", "qf: filteredOnly ? quickId : '',",
-        "document.getElementById('packageHistoryQuickFilter').value = quickId;",
-        "['packageTagFilterInput', 'packageFilterInput', 'packageFilterInput2', 'packageFilterInput3'].forEach(id => {",
-        "['packageHistoryFilterInput', 'packageHistoryFilterInput2', 'packageHistoryFilterInput3', 'packageHistoryFilterInput4'].forEach(id => {",
-        'id="packageFilterInput3"', 'mb-1">Filter 3:</label>', 'id="packageHistoryFilterInput4"', 'border-b">Filter 3</th>',
-        "state.filterText3 && !logHaystack.includes(state.filterText3)",
-        "q4: keyword3,", "q4: filteredOnly ? keyword3 : '',",
-        "document.getElementById('packageHistoryFilterInput4').value = message3;",
-        'data-field="message3"',
-    ):
-        _assert(needle in source_text, f"quick filter contract missing: {needle}")
-
-
-def test_package_log_switch_project_keeps_session() -> None:
-    """Switching project in the Stream window = Stop + Start: the old session is closed and kept, a new one starts."""
-    source_text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
-    for needle in (
-        'id="packageStreamProjectSelect"',
-        "function switchPackageStreamProject(pkg)",
-        "if (!pkg || pkg === packageStreamTarget) return;",
-        "socket.emit('start_package_log', {package_id: pkg});",
-        "packageStreamTarget = payload.package_id || '';",
-    ):
-        _assert(needle in source_text, f"project switcher contract missing: {needle}")
-    with _TempPackageDb() as db:
-        lc._init_package_log_db()
-        client = lc.socketio.test_client(lc.app)
-        try:
-            client.get_received()
-            client.emit("start_package_log", {"package_id": "com.first.app"})
-            first_session = lc.active_package_log_session_id
-            client.emit("start_package_log", {"package_id": "com.second.app"})
-            second_session = lc.active_package_log_session_id
-            resets = [msg["args"][0] for msg in client.get_received() if msg["name"] == "package_log_reset"]
-            _assert_equal([r["package_id"] for r in resets], ["com.first.app", "com.second.app"], "each start must announce its project")
-            _assert(first_session and second_session and first_session != second_session, "switching must open a new session")
-            _assert_equal(lc.target_package_name, "com.second.app", "the new project must be captured")
-            conn = db.connect()
-            rows = {row[0]: (row[1], row[2]) for row in conn.execute("SELECT id, package_id, status FROM package_log_sessions")}
-            conn.close()
-            _assert_equal(rows[first_session], ("com.first.app", "stopped"), "the previous project's session must be closed and kept")
-            _assert_equal(rows[second_session], ("com.second.app", "running"), "the new project's session must be running")
-            client.emit("start_package_log", {"package_id": ""})
-        finally:
-            client.disconnect()
-            lc.target_package_name = ""
-            lc.active_package_log_session_id = None
-
-
-def test_package_quick_filters_api() -> None:
-    """Quick filters are user settings in the data dir, one file per platform."""
-    original_data_dir = os.environ.get("EVENTINSPECTOR_DATA_DIR")
-    with tempfile.TemporaryDirectory() as temp_dir:
-        os.environ["EVENTINSPECTOR_DATA_DIR"] = temp_dir
-        try:
-            client = lc.app.test_client()
-            for platform in ("android", "ios"):
-                data = client.get(f"/api/package-quick-filters?platform={platform}").get_json()
-                _assert(data["ok"] and data["is_default"], f"{platform} must start with the default quick filters")
-                _assert_equal(data["filters"], data["defaults"], f"{platform} defaults are not served")
-            good = {"id": "iap", "name": "IAP", "tag": " Unity ", "message1": " [iap] ", "message2": ""}
-            bad_cases = [
-                {"filters": [good]},
-                {"platform": "web", "filters": [good]},
-                {"platform": "android", "filters": "x"},
-                {"platform": "android", "filters": [dict(good, name=" ")]},
-                {"platform": "android", "filters": [dict(good, tag="", message1="", message2=" ")]},
-                {"platform": "android", "filters": [dict(good, id="bad id")]},
-                {"platform": "android", "filters": [good, dict(good)]},
-                {"platform": "android", "filters": [dict(good, message1="x" * 201)]},
-                {"platform": "ios", "filters": [good]},
-                {"platform": "android", "filters": [dict(good, id=f"f{i}") for i in range(lc.PACKAGE_QUICK_FILTER_MAX + 1)]},
-            ]
-            for payload in bad_cases:
-                _assert_equal(client.post("/api/package-quick-filters", json=payload).status_code, 400, f"invalid quick filters were accepted: {payload}")
-            saved = client.post("/api/package-quick-filters", json={"platform": "android", "filters": [good]}).get_json()
-            _assert_equal((saved["filters"][0]["tag"], saved["filters"][0]["message1"]), ("Unity", "[iap]"), "filter text must be trimmed")
-            legacy = client.post("/api/package-quick-filters", json={"platform": "android", "filters": [dict(good, case_sensitive=True)]}).get_json()
-            _assert(legacy["ok"] and "case_sensitive" not in legacy["filters"][0], "an old case_sensitive flag must be ignored, not stored")
-            android_path = os.path.join(temp_dir, "package_quick_filters_android.json")
-            ios_path = os.path.join(temp_dir, "package_quick_filters_ios.json")
-            _assert(os.path.exists(android_path) and not os.path.exists(ios_path), "Android filters must be saved in their own file only")
-            _assert(client.get("/api/package-quick-filters?platform=ios").get_json()["is_default"], "saving Android must not change iOS")
-            ios_filter = dict(good, id="ios_iap", name="iOS IAP", tag="")
-            client.post("/api/package-quick-filters", json={"platform": "ios", "filters": [ios_filter]})
-            _assert(os.path.exists(ios_path), "iOS filters must be saved in their own file")
-            _assert_equal(client.get("/api/package-quick-filters?platform=android").get_json()["filters"], saved["filters"], "saving iOS must not change Android")
-            html = client.get("/").get_data(as_text=True)
-            _assert('"name": "IAP"' in html and '"name": "iOS IAP"' in html, "both saved lists must be rendered into the page")
-            with open(android_path, "w", encoding="utf-8") as handle:
-                handle.write("{broken")
-            _assert(client.get("/api/package-quick-filters?platform=android").get_json()["is_default"], "a broken file must fall back to defaults")
-            client.post("/api/package-quick-filters", json={"platform": "android", "filters": [good]})
-            reset = client.post("/api/package-quick-filters", json={"platform": "ios", "reset": True}).get_json()
-            _assert(reset["is_default"] and not os.path.exists(ios_path), "reset must remove only that platform's file")
-            _assert(os.path.exists(android_path), "resetting iOS must not touch the Android file")
-            _assert(not any(name.startswith("package_quick_filters") for name in os.listdir(ROOT)), "quick filters must not be written into the app folder")
-        finally:
-            if original_data_dir is None:
-                os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
-            else:
-                os.environ["EVENTINSPECTOR_DATA_DIR"] = original_data_dir
-
-
-def test_package_quick_filter_upgrade_backup_export_import() -> None:
-    """User filters survive updates, new defaults are appended once, broken files are kept, export/import round-trips."""
-    original_data_dir = os.environ.get("EVENTINSPECTOR_DATA_DIR")
-    original_defaults = lc.DEFAULT_PACKAGE_QUICK_FILTERS
-    with tempfile.TemporaryDirectory() as temp_dir:
-        os.environ["EVENTINSPECTOR_DATA_DIR"] = temp_dir
-        try:
-            client = lc.app.test_client()
-            path = os.path.join(temp_dir, "package_quick_filters_android.json")
-            mine = {"id": "fmine", "name": "Mine", "tag": "", "message1": "my text", "message2": "", "message3": ""}
-            kept = [dict(f) for f in original_defaults["android"] if f["id"] != "ads_event"] + [mine]
-            # A file saved before seen_defaults existed: nothing is added back.
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump({"version": 2, "platform": "android", "filters": kept}, handle)
-            filters, is_default = lc._load_package_quick_filters("android")
-            _assert(not is_default and [f["id"] for f in filters] == [f["id"] for f in kept], "a legacy file must load unchanged (deleted defaults stay deleted)")
-            with open(path, encoding="utf-8") as handle:
-                _assert_equal(sorted(json.load(handle)["seen_defaults"]), sorted(f["id"] for f in original_defaults["android"]), "a legacy file must record the defaults it has seen")
-
-            # A newer release ships a new default: it is appended once, nothing else changes.
-            new_default = {"id": "iap", "name": "IAP", "tag": "", "message1": "[iap]", "message2": "", "message3": ""}
-            lc.DEFAULT_PACKAGE_QUICK_FILTERS = {"android": tuple(original_defaults["android"]) + (new_default,), "ios": original_defaults["ios"]}
-            filters, _ = lc._load_package_quick_filters("android")
-            _assert_equal([f["id"] for f in filters], [f["id"] for f in kept] + ["iap"], "a new default must be appended after the user's filters")
-            _assert_equal(filters[len(kept) - 1], mine, "the user's own filter must not change")
-            with open(path, encoding="utf-8") as handle:
-                _assert("iap" in json.load(handle)["seen_defaults"], "the added default must be remembered as seen")
-            # The user deletes it: it must not come back.
-            client.post("/api/package-quick-filters", json={"platform": "android", "filters": kept})
-            filters, _ = lc._load_package_quick_filters("android")
-            _assert("iap" not in [f["id"] for f in filters], "a default the user deleted must not come back")
-            lc.DEFAULT_PACKAGE_QUICK_FILTERS = original_defaults
-
-            # Broken files are kept as a backup, never silently overwritten.
-            for broken in ("{broken", json.dumps({"filters": [{"id": "x"}]})):
-                for name in os.listdir(temp_dir):
-                    if ".broken-" in name:
-                        os.remove(os.path.join(temp_dir, name))
-                with open(path, "w", encoding="utf-8") as handle:
-                    handle.write(broken)
-                filters, is_default = lc._load_package_quick_filters("android")
-                backups = [name for name in os.listdir(temp_dir) if name.startswith("package_quick_filters_android.json.broken-")]
-                _assert(is_default and not os.path.exists(path), "a broken file must fall back to defaults and move aside")
-                _assert_equal(len(backups), 1, "a broken file must be kept as one backup")
-                with open(os.path.join(temp_dir, backups[0]), encoding="utf-8") as handle:
-                    _assert_equal(handle.read(), broken, "the backup must hold the original bytes")
-
-            # Export writes a file (no app window here, so into <data dir>/exports).
-            _assert_equal(client.post("/api/package-quick-filters/export", json={"platform": "android", "filters": [dict(mine, name="")]}).status_code, 400, "invalid filters must not be exported")
-            exported = client.post("/api/package-quick-filters/export", json={"platform": "android", "filters": kept}).get_json()
-            _assert(exported["ok"] and exported["path"].startswith(os.path.join(temp_dir, "exports")), f"export failed: {exported}")
-            with open(exported["path"], encoding="utf-8") as handle:
-                data = json.load(handle)
-            _assert_equal((data["kind"], data["platform"], data["filters"]), (lc.PACKAGE_QUICK_FILTER_EXPORT_KIND, "android", kept), "exported file content is wrong")
-
-            # In a browser the page saves the file itself: the API only returns the content.
-            exports_before = sorted(os.listdir(os.path.join(temp_dir, "exports")))
-            download = client.post("/api/package-quick-filters/export", json={"platform": "android", "filters": kept, "download": True}).get_json()
-            _assert(download["ok"] and download["filename"].startswith("quick_filters_android_") and download["filename"].endswith(".json"), f"download export failed: {download}")
-            _assert_equal(json.loads(download["content"]), data, "download content must equal the exported file")
-            _assert_equal(sorted(os.listdir(os.path.join(temp_dir, "exports"))), exports_before, "download mode must not write a file on the server")
-            html = client.get("/").get_data(as_text=True)
-            _assert("var packageNativeFileDialog = false;" in html, "without an app window the page must use the browser save path")
-            _assert("window.showSaveFilePicker" in html and "download: true" in html, "browser export must let the user choose where to save")
-
-            # Import validates and returns the list; it does not save by itself.
-            _assert(not os.path.exists(path), "precondition: nothing saved")
-            imported = client.post("/api/package-quick-filters/import", json={"platform": "android", "data": data}).get_json()
-            _assert(imported["ok"] and imported["filters"] == kept, "import must return the exported filters")
-            _assert(not os.path.exists(path), "import must not save until the user presses Save")
-            wrong = client.post("/api/package-quick-filters/import", json={"platform": "ios", "data": data})
-            _assert_equal((wrong.status_code, wrong.get_json()["error"]), (400, "wrong_platform"), "an Android file must not import into iOS")
-            _assert_equal(client.post("/api/package-quick-filters/import", json={"platform": "android", "data": {"x": 1}}).status_code, 400, "a non-filter file must be refused")
-            ios_with_tag = {"platform": "ios", "filters": [dict(mine, tag="Unity")]}
-            _assert_equal(client.post("/api/package-quick-filters/import", json={"platform": "ios", "data": ios_with_tag}).status_code, 400, "iOS import must refuse a tag")
-        finally:
-            lc.DEFAULT_PACKAGE_QUICK_FILTERS = original_defaults
-            if original_data_dir is None:
-                os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
-            else:
-                os.environ["EVENTINSPECTOR_DATA_DIR"] = original_data_dir
-
-
-def test_package_quick_filter_history_query() -> None:
-    """Recorded logs, session search and export apply the same quick filter as the live view."""
-    original_data_dir = os.environ.get("EVENTINSPECTOR_DATA_DIR")
-    with tempfile.TemporaryDirectory() as temp_dir, _TempPackageDb() as db:
-        os.environ["EVENTINSPECTOR_DATA_DIR"] = temp_dir
-        try:
-            lc._init_package_log_db()
-            conn = db.connect()
-            session_id = conn.execute(
-                "INSERT INTO package_log_sessions (package_id, started_at, ended_at, status) VALUES ('qf', ?, ?, 'stopped')",
-                (time.time(), time.time()),
-            ).lastrowid
-            rows = [
-                ("Unity", "[Ad,RewardedBidding, MAX] Raise"),
-                ("Unity", "[Ad,InterstitialBidding] Raise"),
-                ("AppLovinSdk", "[TaskCollectSignals] bidding token"),
-                ("Adjust", "event tracked"),
-                ("Unity", "100%_off [IAP] Entitlement adjust"),
-                ("", "[Adjust]: Event tracked"),
-            ]
-            for tag, message in rows:
-                conn.execute(
-                    "INSERT INTO package_log_entries (session_id, created_at, time_display, device_id, device_name, level, tag, message, raw_log) VALUES (?, ?, '10:00:00.000', 'd', 'Dev', 'I', ?, ?, ?)",
-                    (session_id, time.time(), tag, message, f"10:00:00.000 I {tag}: {message}"),
-                )
-            conn.commit()
-            conn.close()
-            client = lc.app.test_client()
-
-            def messages(qf, qp="android"):
-                data = client.get(f"/api/package-log/logs?session_id={session_id}&qf={qf}&qp={qp}").get_json()
-                _assert(data["ok"], f"history query failed for {qf}: {data}")
-                return sorted(row["message"] for row in data["rows"])
-
-            _assert_equal(messages("bidding"), ["[Ad,InterstitialBidding] Raise", "[Ad,RewardedBidding, MAX] Raise"], "Bidding must need [ad, and bidding")
-            _assert_equal(messages("adjust"), ["event tracked"], "Android Adjust must match the tag only")
-            _assert_equal(messages("adjust", "ios"), ["[Adjust]: Event tracked"], "iOS Adjust must search the whole log for adjust]")
-            _assert_equal(messages("applovinsdk"), ["[TaskCollectSignals] bidding token"], "Applovinsdk must search the whole log")
-
-            def typed(**query):
-                params = "&".join(f"{key}={value}" for key, value in query.items())
-                data = client.get(f"/api/package-log/logs?session_id={session_id}&{params}").get_json()
-                return sorted(row["message"] for row in data["rows"])
-
-            _assert_equal(typed(q1="raise"), ["[Ad,InterstitialBidding] Raise", "[Ad,RewardedBidding, MAX] Raise"], "Filter 1 search is wrong")
-            _assert_equal(typed(q1="raise", q2="bidding", q4="max"), ["[Ad,RewardedBidding, MAX] Raise"], "Filter 3 (q4) must narrow Filter 1 + 2")
-            _assert_equal(typed(q4="tracked"), ["[Adjust]: Event tracked", "event tracked"], "Filter 3 alone must search the whole log")
-            two_boxes = [
-                {"id": "two", "name": "Two", "tag": "", "message1": "raise", "message2": "rewarded"},
-                {"id": "three", "name": "Three", "tag": "", "message1": "raise", "message2": "bidding", "message3": "interstitial"},
-            ]
-            client.post("/api/package-quick-filters", json={"platform": "android", "filters": two_boxes})
-            _assert_equal(messages("two"), ["[Ad,RewardedBidding, MAX] Raise"], "Filter 2 must narrow the Filter 1 result")
-            _assert_equal(messages("three"), ["[Ad,InterstitialBidding] Raise"], "quick filter Filter 3 must narrow Filter 1 + 2")
-            _assert_equal(client.get(f"/api/package-log/logs?session_id={session_id}&qf=missing").status_code, 400, "unknown quick filter must be refused")
-            custom = [
-                {"id": "pct", "name": "Pct", "tag": "", "message1": "100%_off", "message2": ""},
-                {"id": "iap", "name": "IAP", "tag": "UNITY", "message1": "[IAP]", "message2": ""},
-                {"id": "iap_lower", "name": "iap", "tag": "", "message1": "[iap]", "message2": "ENTITLEMENT"},
-            ]
-            _assert(client.post("/api/package-quick-filters", json={"platform": "android", "filters": custom}).get_json()["ok"], "custom filters were refused")
-            _assert_equal(messages("pct"), ["100%_off [IAP] Entitlement adjust"], "filter text must be literal, not LIKE wildcards")
-            _assert_equal(messages("iap"), ["100%_off [IAP] Entitlement adjust"], "tag + filter must ignore case")
-            _assert_equal(messages("iap_lower"), ["100%_off [IAP] Entitlement adjust"], "filters must never be case sensitive")
-            _assert_equal(client.get(f"/api/package-log/logs?session_id={session_id}&qf=pct&qp=ios").status_code, 400, "an Android filter must not exist in the iOS list")
-        finally:
-            if original_data_dir is None:
-                os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
-            else:
-                os.environ["EVENTINSPECTOR_DATA_DIR"] = original_data_dir
+    _assert(source_text.count(needle) == 1, "RewardedBidding must use the exact message needle")
+    _assert('data-message-needle="[Ad,RewardedBidding,"' not in source_text, "RewardedBidding filter must not require a trailing comma")
+    _assert('data-android-only="true"' in source_text, "RewardedBidding must be Android-only")
+    _assert("exactMessage.includes(state.quickMessage)" in source_text, "message filter must remain case-sensitive")
+    _assert("flex items-start justify-start gap-32" in source_text, "RewardedBidding layout must stay beside the first filter column")
 
 
 def test_price_rotation_exact_parser() -> None:
@@ -3696,7 +3002,6 @@ def test_load_ads_max_contract() -> None:
         lc.load_ads_ext_events.clear()
         lc.unique_load_ads_ext.clear()
         lc.socketio.emit = lambda event, payload: emitted.append((event, payload))
-        lc._clear_live_table_pending()
         lc.send_to_sheet = lambda *args: sheet_rows.append(args)
 
         samples = [
@@ -3715,8 +3020,8 @@ def test_load_ads_max_contract() -> None:
         _assert(all(row.get("provider") == "MAX" for row in rows), "MAX Load Ads provider was not recorded")
         _assert(all(row.get("ad_network") == "Pangle" for row in rows), "MAX networkName was not parsed from the raw log")
         _assert(all(lc.MAX_LOAD_ADS_REVENUE_KEYWORD in row.get("raw_log", "") for row in rows), "MAX raw callback log was not preserved")
-        _assert_equal(len(_live_rows_sent(emitted, "load_ads_ext")), 4, "MAX Load Ads rows were not emitted to the UI")
-        _assert(not _live_rows_sent(emitted, "load_ads"), "MAX rows were emitted to the hidden Load Ads table")
+        _assert_equal(len(emitted), 4, "MAX Load Ads rows were not emitted to the UI")
+        _assert(all(event_name == "update_load_ads_ext" for event_name, _ in emitted), "MAX rows were emitted to the hidden Load Ads table")
         _assert_equal(len(sheet_rows), 4, "MAX Load Ads rows were not sent to the sheet")
         _assert(all(args[4:] == ("LoadAdsExt", "MAX") for args in sheet_rows), "MAX sheet payload used the wrong provider or tab")
 
@@ -3759,7 +3064,6 @@ def test_ios_load_ads_max_viewability_contract() -> None:
         lc.unique_load_ads_ext.clear()
         lc.incomplete_ios_max_load_ads_logs.clear()
         lc.socketio.emit = lambda event, payload: emitted.append((event, payload))
-        lc._clear_live_table_pending()
         lc.send_to_sheet = lambda *args: sheet_rows.append(args)
 
         lines = [
@@ -3783,7 +3087,7 @@ def test_ios_load_ads_max_viewability_contract() -> None:
         _assert_equal(rows[0].get("adapter_class"), "ALChartboostMediationAdapter", "iOS MAX adapter class was not parsed")
         _assert_equal(rows[0].get("adapter_version"), "9.14.0.1", "iOS MAX adapter version was not parsed")
         _assert(lc.MAX_LOAD_ADS_VIEWABILITY_KEYWORD in rows[0].get("raw_log", ""), "iOS MAX raw multiline log was not preserved")
-        _assert(_live_rows_sent(emitted, "load_ads_ext"), "iOS MAX row was not emitted to Load Ads")
+        _assert_equal(emitted[0][0], "update_load_ads_ext", "iOS MAX row was not emitted to Load Ads")
         _assert_equal(sheet_rows[0][4:], ("LoadAdsExt", "MAX"), "iOS MAX sheet payload used the wrong tab or provider")
         _assert_equal(lc.incomplete_ios_max_load_ads_logs, {}, "completed iOS MAX log left a stale buffer")
     finally:
@@ -3874,7 +3178,6 @@ def test_ios_load_ads_max_delegate_contract() -> None:
         lc.unique_load_ads_ext.clear()
         lc.incomplete_ios_max_load_ads_logs.clear()
         lc.socketio.emit = lambda event, payload: emitted.append((event, payload))
-        lc._clear_live_table_pending()
         lc.send_to_sheet = lambda *args: sheet_rows.append(args)
 
         samples = [
@@ -3903,8 +3206,8 @@ def test_ios_load_ads_max_delegate_contract() -> None:
             all(any(keyword in row.get("raw_log", "") for keyword in lc.MAX_LOAD_ADS_IOS_DELEGATE_KEYWORDS) for row in rows),
             "iOS MAX delegate raw logs were not preserved",
         )
-        _assert_equal(len(_live_rows_sent(emitted, "load_ads_ext")), 4, "iOS MAX delegate rows were not emitted to the UI")
-        _assert(not _live_rows_sent(emitted, "load_ads"), "iOS MAX delegate rows used the wrong UI event")
+        _assert_equal(len(emitted), 4, "iOS MAX delegate rows were not emitted to the UI")
+        _assert(all(event_name == "update_load_ads_ext" for event_name, _ in emitted), "iOS MAX delegate rows used the wrong UI event")
         _assert_equal(len(sheet_rows), 4, "iOS MAX delegate rows were not sent to the sheet")
         _assert(all(args[4:] == ("LoadAdsExt", "MAX") for args in sheet_rows), "iOS MAX delegate sheet target was wrong")
 
@@ -3944,7 +3247,6 @@ def test_levelplay_impression_data_callback_contract() -> None:
         lc.is_paused = False
         lc.callback_ad_logs.clear()
         lc.socketio.emit = lambda event, payload: emitted.append((event, payload))
-        lc._clear_live_table_pending()
 
         ad_units = {
             "Banner": {"mediationAdUnitName": "Banner", "adUnit": "banner", "adFormat": "banner"},
@@ -3966,7 +3268,7 @@ def test_levelplay_impression_data_callback_contract() -> None:
         )
         _assert(all(row["type"] == "Callback Levelplay" for row in rows), "LevelPlay impression mapper rows must use the LevelPlay callback filter")
         _assert(all("LevelPlayAdImpressionEventMapper->Map" in row["raw_log"] for row in rows), "LevelPlay impression raw logs were not preserved")
-        _assert_equal(len(_live_rows_sent(emitted, "callback")), 3, "LevelPlay impression callbacks were not emitted to the Callback tab")
+        _assert_equal(len(emitted), 3, "LevelPlay impression callbacks were not emitted to the Callback tab")
 
         # Existing LevelPlay listener callbacks must keep their old display name.
         lc.process_callback_and_ad_event_log("Unity LevelPlayInterstitialAdListener", "device-levelplay")
@@ -4021,7 +3323,6 @@ def test_ascendx_cloudx_callback_contract() -> None:
         lc.is_paused = False
         lc.callback_ad_logs.clear()
         lc.socketio.emit = lambda event, payload: emitted.append((event, payload))
-        lc._clear_live_table_pending()
 
         for callback_event in lc.ASCENDX_CALLBACK_EVENTS:
             ad_unit = "Reward" if callback_event == "_OnAdReceivedRewardEvent" else "Interstitial"
@@ -4050,7 +3351,7 @@ def test_ascendx_cloudx_callback_contract() -> None:
         _assert_equal(rows[6]["event_name"], "OnAdLoadFailed - Interstitial", "CloudX ad unit name was not added")
         _assert_equal(rows[11]["event_name"], "OnAdRewarded - Reward", "CloudX reward name was not added")
         _assert(all(row["raw_log"].startswith("Unity [Ad,") for row in rows), "provider callback raw logs were not preserved")
-        _assert_equal(len(_live_rows_sent(emitted, "callback")), len(rows), "provider callbacks were not emitted to the Callback tab")
+        _assert_equal(len(emitted), len(rows), "provider callbacks were not emitted to the Callback tab")
 
         rendered = lc.app.test_client().get("/").get_data(as_text=True)
         for marker in (
@@ -5389,15 +4690,6 @@ TESTS: List[Callable[[], None]] = [
     test_package_log_sessions_api_pages,
     test_package_log_retention_policy,
     test_package_log_compact_api,
-    test_specific_validator_delta_matches_full_rebuild,
-    test_specific_validator_filters_clear_and_snapshot,
-    test_specific_validator_delta_ui_contract,
-    test_validator_delta_matches_server_table,
-    test_validator_delta_ui_contract,
-    test_revenue_delta_matches_full_rebuild,
-    test_live_tables_delta_snapshot_and_clear,
-    test_live_tables_ui_contract,
-    test_ui_zoom_setting_contract,
     test_package_log_delta_ui_contract,
     test_main_script_has_unique_top_level_names,
     test_android_package_log_ignores_global_pause,
@@ -5417,10 +4709,6 @@ TESTS: List[Callable[[], None]] = [
     test_bright_skad_ipa_inspection_contract,
     test_preset_revert_protection_contract,
     test_rewarded_bidding_filter_contract,
-    test_package_quick_filters_api,
-    test_package_log_switch_project_keeps_session,
-    test_package_quick_filter_history_query,
-    test_package_quick_filter_upgrade_backup_export_import,
     test_price_rotation_exact_parser,
     test_load_ads_provider_contract,
     test_load_ads_max_contract,
