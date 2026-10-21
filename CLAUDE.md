@@ -22,6 +22,7 @@ These rules are mandatory for work in this repository.
 - For normal local work, run `python3 tools/eventchecker_harness.py --profile local`; this does not pretend an uncommitted worktree is the published release.
 - For a release gate, first commit the app-only source, then run `python3 tools/sync_update_manifest.py --payload-ref <commit-sha> --version <release-version>`, followed by `python3 tools/eventchecker_harness.py --profile release`.
 - Official releases go out through the in-app remote update only: commit the app payload, regenerate `Updates_2_5/remote_manifest.json`, and publish it on `main`. Do not rebuild or redistribute the `.app`/`.dmg`/`.exe` for a release. A new packaged build is allowed only when the user explicitly asks for one in the current request.
+- Build numbers go up by exactly 1 per published update: the next release is the build live on `main` + 1 (e.g. 79 -> 80). Never skip a number. A rollback candidate prepared in advance also uses live + 1, but it is only a candidate and does not reserve that number: if the next release is published instead, rebuild the rollback candidate as the new live + 1 with the previous release's content.
 - A request to fix code does not authorize a build or release. A request to start local authorizes only the local server/process.
 - Before any official release/update, verify the update path on every requested platform and preserve a tested rollback path.
 - Never use a destructive reset or overwrite to recover a release. Preserve user changes and diagnose first.
