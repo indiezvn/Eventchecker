@@ -75,10 +75,10 @@
       }
     },
     {
-      "code": "TP",
+      "code": "YE",
       "android": {
-        "id": "tap.monster.block.away",
-        "label": "TP - tap.monster.block.away"
+        "id": "com.indiez.wool.crush.fever",
+        "label": "YE - com.indiez.wool.crush.fever"
       }
     }
   ]
