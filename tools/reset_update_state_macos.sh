@@ -4,10 +4,10 @@ set -u
 
 APP_SUPPORT_DIR="${HOME}/Library/Application Support/EventInspector"
 MANIFEST_URL="https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json"
-TARGET_VERSION="2026-10-21-9-2.5.0-82"
+TARGET_VERSION="2026-10-27-1-2.5.0-83"
 
 echo "Event Inspector update reset (macOS)"
-echo "Target release: v2.5.0(82)"
+echo "Target release: v2.5.0(83)"
 echo "Target folder: ${APP_SUPPORT_DIR}"
 echo
 echo "Make sure Event Inspector is fully closed before continuing."
