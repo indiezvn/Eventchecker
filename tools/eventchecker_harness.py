@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 84
+RELEASE_SOURCE_BUILD = 85
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2345,6 +2345,14 @@ def test_full_window_layout() -> None:
     _assert('<div id="tabScrollArea" class="flex-grow overflow-auto">' in text, "tab area id missing")
     _assert('#tabScrollArea > [id^="tabContent"]:not(.hidden) { flex: 1 0 auto; display: flex; flex-direction: column; }' in text, "visible tab must fill the height")
     _assert('#tabScrollArea > [id^="tabContent"]:not(.hidden) > div:last-child { flex: 1 0 auto; }' in text, "last card of the visible tab must stretch")
+
+
+def test_indiez_logo_footer() -> None:
+    """The INDIEZ logo sits in the footer, embedded as a PNG data URI so the update payload carries it."""
+    _assert(lc.INDIEZ_LOGO_DATA_URI.startswith("data:image/png;base64,iVBORw0KGgo"), "footer logo must be an embedded PNG")
+    html = lc.app.test_client().get("/").get_data(as_text=True)
+    _assert('<div id="appFooter" class="flex-shrink-0 flex items-center justify-center pt-2">' in html, "footer missing")
+    _assert(f'<img src="{lc.INDIEZ_LOGO_DATA_URI}" alt="INDIEZ"' in html, "footer must render the INDIEZ logo")
 
 
 def test_specific_filter_boxes_compact() -> None:
@@ -5650,6 +5658,7 @@ TESTS: List[Callable[[], None]] = [
     test_ui_zoom_setting_contract,
     test_specific_filter_boxes_compact,
     test_full_window_layout,
+    test_indiez_logo_footer,
     test_sdk_check_results_text_size,
     test_repository_moved_to_indiezvn,
     test_package_log_delta_ui_contract,
