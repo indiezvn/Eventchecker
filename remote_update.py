@@ -16,23 +16,15 @@ STATE_FILENAME = "update_state_v250.json"
 UPDATES_DIRNAME = "updates_v250"
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAYS = (0.35, 1.0)
-# The repository moved to the company organization (indiezvn).  The old
-# trucbm URLs stay as fallbacks; GitHub redirects them to the new repo.
 DEFAULT_MANIFEST_URLS = [
-    "https://github.com/indiezvn/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
-    "https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json",
     "https://github.com/trucbm/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
     "https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json",
-    "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@main/Updates_2_5/remote_manifest.json",
     "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@main/Updates_2_5/remote_manifest.json",
 ]
 DEFAULT_MANIFEST_URL = DEFAULT_MANIFEST_URLS[0]
 DEFAULT_FILE_URL_BASES = [
-    "https://github.com/indiezvn/Eventchecker/raw/main",
-    "https://raw.githubusercontent.com/indiezvn/Eventchecker/main",
     "https://github.com/trucbm/Eventchecker/raw/main",
     "https://raw.githubusercontent.com/trucbm/Eventchecker/main",
-    "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@main",
     "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@main",
 ]
 KNOWN_CHANNELS = ("v250",)

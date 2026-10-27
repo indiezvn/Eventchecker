@@ -49,15 +49,11 @@ RECORD_SHEET_READ_TIMEOUT_SEC = 8
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SDK_CHECK_PRESETS_FILENAME = "sdk_check_presets.json"
 SDK_CHECK_PRESETS_REMOTE_URLS = [
-    "https://raw.githubusercontent.com/indiezvn/Eventchecker/main/sdk_check_presets.json",
-    "https://github.com/indiezvn/Eventchecker/raw/main/sdk_check_presets.json",
     "https://raw.githubusercontent.com/trucbm/Eventchecker/main/sdk_check_presets.json",
     "https://github.com/trucbm/Eventchecker/raw/main/sdk_check_presets.json",
 ]
 PACKAGE_LOG_PRESETS_FILENAME = "package_log_presets.json"
 PACKAGE_LOG_PRESETS_REMOTE_URLS = [
-    "https://raw.githubusercontent.com/indiezvn/Eventchecker/main/package_log_presets.json",
-    "https://github.com/indiezvn/Eventchecker/raw/main/package_log_presets.json",
     "https://raw.githubusercontent.com/trucbm/Eventchecker/main/package_log_presets.json",
     "https://github.com/trucbm/Eventchecker/raw/main/package_log_presets.json",
 ]
@@ -458,15 +454,10 @@ DEFAULT_AD_EVENT_SIMPLE_PROVIDER_LABELS = {
     "gadsme": "Gadsme",
 }
 REMOTE_UPDATE_CONFIG_FILENAME = "remote_update_config_v250.json"
-# Repository moved to the company organization (indiezvn); the old trucbm
-# URLs stay as fallbacks (GitHub redirects them).
-DEFAULT_REMOTE_MANIFEST_URL = "https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json"
+DEFAULT_REMOTE_MANIFEST_URL = "https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json"
 DEFAULT_REMOTE_MANIFEST_URLS = [
-    "https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json",
-    "https://github.com/indiezvn/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
     "https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json",
     "https://github.com/trucbm/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
-    "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@main/Updates_2_5/remote_manifest.json",
     "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@main/Updates_2_5/remote_manifest.json",
 ]
 APP_AUDIT_CONFIG_FILENAME = "app_audit_config.json"
@@ -4736,7 +4727,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(83)</title>
+    <title>Event Inspector v2.5.0(84)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4832,7 +4823,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(83)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(84)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>

@@ -20,10 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "Updates_2_5" / "remote_manifest.json"
 IMMUTABLE_REF_RE = re.compile(r"^[0-9a-f]{40}$")
 PAYLOAD_URL_BASES = (
-    "https://github.com/indiezvn/Eventchecker/raw/{ref}",
-    "https://raw.githubusercontent.com/indiezvn/Eventchecker/{ref}",
+    "https://github.com/trucbm/Eventchecker/raw/{ref}",
     "https://raw.githubusercontent.com/trucbm/Eventchecker/{ref}",
-    "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@{ref}",
+    "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@{ref}",
 )
 PROTECTED_PRESET_PATHS = {
     "sdk_check_presets.json",
