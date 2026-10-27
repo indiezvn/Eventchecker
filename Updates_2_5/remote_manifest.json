@@ -1,83 +1,76 @@
 {
-  "version": "2026-10-27-1-2.5.0-83",
-  "payload_ref": "2179fe4e2a8d0f7026decdea6dc0741832b53a11",
+  "version": "2026-10-27-2-2.5.0-84",
+  "payload_ref": "75ea29b72ca5860276f29ad4eeb76ee3803b2803",
   "update_enabled": true,
   "update_message": "",
   "files": [
     {
       "path": "Log_checker.py",
-      "url": "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/Log_checker.py",
+      "url": "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/Log_checker.py",
       "urls": [
-        "https://github.com/indiezvn/Eventchecker/raw/2179fe4e2a8d0f7026decdea6dc0741832b53a11/Log_checker.py",
-        "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/Log_checker.py",
-        "https://raw.githubusercontent.com/trucbm/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/Log_checker.py",
-        "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@2179fe4e2a8d0f7026decdea6dc0741832b53a11/Log_checker.py"
+        "https://github.com/trucbm/Eventchecker/raw/75ea29b72ca5860276f29ad4eeb76ee3803b2803/Log_checker.py",
+        "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/Log_checker.py",
+        "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@75ea29b72ca5860276f29ad4eeb76ee3803b2803/Log_checker.py"
       ],
-      "sha256": "f2023176dca7fc831a64ff51e8ec4eecd0bbe7c39c6ffbd5b7d1985d3d1c890c"
+      "sha256": "1f28ca7b6c8f790cf78b467b52710743c8d25785f017b6d866aacb408904ee6c"
     },
     {
       "path": "remote_update.py",
-      "url": "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update.py",
+      "url": "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/remote_update.py",
       "urls": [
-        "https://github.com/indiezvn/Eventchecker/raw/2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update.py",
-        "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update.py",
-        "https://raw.githubusercontent.com/trucbm/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update.py",
-        "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update.py"
+        "https://github.com/trucbm/Eventchecker/raw/75ea29b72ca5860276f29ad4eeb76ee3803b2803/remote_update.py",
+        "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/remote_update.py",
+        "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@75ea29b72ca5860276f29ad4eeb76ee3803b2803/remote_update.py"
       ],
-      "sha256": "04336374f0164cefc0c18f1751c799aa56e222f19edd26c00a4fde4f48e3efec"
+      "sha256": "177eba6757e8dc9521958d19210c3ea95c3cd48e2dc876281b9bf3afdc93fb90"
     },
     {
       "path": "remote_update_config_v250.json",
-      "url": "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update_config_v250.json",
+      "url": "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/remote_update_config_v250.json",
       "urls": [
-        "https://github.com/indiezvn/Eventchecker/raw/2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update_config_v250.json",
-        "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update_config_v250.json",
-        "https://raw.githubusercontent.com/trucbm/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update_config_v250.json",
-        "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@2179fe4e2a8d0f7026decdea6dc0741832b53a11/remote_update_config_v250.json"
+        "https://github.com/trucbm/Eventchecker/raw/75ea29b72ca5860276f29ad4eeb76ee3803b2803/remote_update_config_v250.json",
+        "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/remote_update_config_v250.json",
+        "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@75ea29b72ca5860276f29ad4eeb76ee3803b2803/remote_update_config_v250.json"
       ],
-      "sha256": "d452e1f56c49168a34f238f95ce8dbeb6c8b456961b4d63e2d0ed9422ec21a53"
+      "sha256": "10eb7518f13031f335303894dbcb4e7f7a9c4da0da3d5959a1423b442f482f44"
     },
     {
       "path": "services_checker/app.py",
-      "url": "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/app.py",
+      "url": "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/app.py",
       "urls": [
-        "https://github.com/indiezvn/Eventchecker/raw/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/app.py",
-        "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/app.py",
-        "https://raw.githubusercontent.com/trucbm/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/app.py",
-        "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/app.py"
+        "https://github.com/trucbm/Eventchecker/raw/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/app.py",
+        "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/app.py",
+        "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/app.py"
       ],
-      "sha256": "b9ed7273f347b054de7e1b9a0db8d2849bf887f3b58cd0d8bd7d0cc72c80c701"
+      "sha256": "af96aa45518068fafa933ffe9772c3489595c6aa91b6b97f39518cdc33c475e1"
     },
     {
       "path": "services_checker/bundletool-all-1.18.1.jar",
-      "url": "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/bundletool-all-1.18.1.jar",
+      "url": "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/bundletool-all-1.18.1.jar",
       "urls": [
-        "https://github.com/indiezvn/Eventchecker/raw/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/bundletool-all-1.18.1.jar",
-        "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/bundletool-all-1.18.1.jar",
-        "https://raw.githubusercontent.com/trucbm/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/bundletool-all-1.18.1.jar",
-        "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/bundletool-all-1.18.1.jar"
+        "https://github.com/trucbm/Eventchecker/raw/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/bundletool-all-1.18.1.jar",
+        "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/bundletool-all-1.18.1.jar",
+        "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/bundletool-all-1.18.1.jar"
       ],
       "sha256": "675786493983787ffa11550bdb7c0715679a44e1643f3ff980a529e9c822595c"
     },
     {
       "path": "services_checker/axml_fallback.py",
-      "url": "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/axml_fallback.py",
+      "url": "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/axml_fallback.py",
       "urls": [
-        "https://github.com/indiezvn/Eventchecker/raw/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/axml_fallback.py",
-        "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/axml_fallback.py",
-        "https://raw.githubusercontent.com/trucbm/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/axml_fallback.py",
-        "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/axml_fallback.py"
+        "https://github.com/trucbm/Eventchecker/raw/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/axml_fallback.py",
+        "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/axml_fallback.py",
+        "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/axml_fallback.py"
       ],
       "sha256": "39f16591b4ff34bd5c8beb71bb0633a2bdeb2fdd0a3c3309376f91c1c5ad03bf"
     },
     {
       "path": "services_checker/my-key.keystore",
-      "url": "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/my-key.keystore",
+      "url": "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/my-key.keystore",
       "urls": [
-        "https://github.com/indiezvn/Eventchecker/raw/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/my-key.keystore",
-        "https://raw.githubusercontent.com/indiezvn/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/my-key.keystore",
-        "https://raw.githubusercontent.com/trucbm/Eventchecker/2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/my-key.keystore",
-        "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@2179fe4e2a8d0f7026decdea6dc0741832b53a11/services_checker/my-key.keystore"
+        "https://github.com/trucbm/Eventchecker/raw/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/my-key.keystore",
+        "https://raw.githubusercontent.com/trucbm/Eventchecker/75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/my-key.keystore",
+        "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@75ea29b72ca5860276f29ad4eeb76ee3803b2803/services_checker/my-key.keystore"
       ],
       "sha256": "48c751cdf0af6d6ed98b0111f852abb988bf27b1398d6ac309c98a95d4ba5d44"
     }
