@@ -5,7 +5,7 @@ rem Official Windows update reset for the v2.5.0 channel.
 rem Use this only while Event Inspector is fully closed.
 
 set "APP_SUPPORT_DIR=%LOCALAPPDATA%\EventInspector"
-set "MANIFEST_URL=https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json"
+set "MANIFEST_URL=https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json"
 set "TARGET_VERSION=2026-10-21-9-2.5.0-82"
 set "UPDATES_DIR_V250=%APP_SUPPORT_DIR%\updates_v250"
 
@@ -51,7 +51,10 @@ for %%C in (v250) do (
   echo   "manifest_url": "%MANIFEST_URL%",
   echo   "manifest_urls": [
   echo     "%MANIFEST_URL%",
+  echo     "https://github.com/indiezvn/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
+  echo     "https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json",
   echo     "https://github.com/trucbm/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
+  echo     "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@main/Updates_2_5/remote_manifest.json",
   echo     "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@main/Updates_2_5/remote_manifest.json"
   echo   ],
   echo   "timeout_sec": 15,

@@ -10,7 +10,7 @@ Muc tieu cua file nay:
 
 Repo GitHub hien tai:
 
-- `https://github.com/trucbm/Eventchecker.git`
+- `https://github.com/indiezvn/Eventchecker.git`
 
 Nhanh chinh:
 
@@ -61,7 +61,7 @@ Neu can build macOS app:
 ## 3. Clone repo ve may moi
 
 ```bash
-git clone https://github.com/trucbm/Eventchecker.git
+git clone https://github.com/indiezvn/Eventchecker.git
 cd Eventchecker
 ```
 

@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 82
+RELEASE_SOURCE_BUILD = 83
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -144,10 +144,15 @@ def _valid_payload_urls(manifest_path: Path, rel_path: str, payload_path: Path) 
     repo_rel = payload_path.relative_to(ROOT).as_posix()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload_ref = str(manifest.get("payload_ref") or "").strip()
+    # The repository moved to indiezvn; trucbm URLs remain valid (redirected).
     return {
-        f"https://github.com/trucbm/Eventchecker/raw/{payload_ref}/{repo_rel}",
-        f"https://raw.githubusercontent.com/trucbm/Eventchecker/{payload_ref}/{repo_rel}",
-        f"https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@{payload_ref}/{repo_rel}",
+        url
+        for owner in ("indiezvn", "trucbm")
+        for url in (
+            f"https://github.com/{owner}/Eventchecker/raw/{payload_ref}/{repo_rel}",
+            f"https://raw.githubusercontent.com/{owner}/Eventchecker/{payload_ref}/{repo_rel}",
+            f"https://cdn.jsdelivr.net/gh/{owner}/Eventchecker@{payload_ref}/{repo_rel}",
+        )
     }
 
 
@@ -2272,6 +2277,56 @@ def test_live_tables_ui_contract() -> None:
         template = html.split(fn, 1)[1].split("\n        }", 1)[0]
         for column in columns:
             _assert(column in template, f"{fn} lost a column: {column}")
+
+
+def test_repository_moved_to_indiezvn() -> None:
+    """Update, payload and preset URLs use the company repo first and keep trucbm as fallback."""
+    import remote_update as updater
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("sync_update_manifest", ROOT / "tools" / "sync_update_manifest.py")
+    sync = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(sync)
+    config = json.loads((ROOT / "remote_update_config_v250.json").read_text(encoding="utf-8"))
+    services = (ROOT / "services_checker" / "app.py").read_text(encoding="utf-8", errors="ignore")
+    groups = {
+        "remote_update.DEFAULT_MANIFEST_URLS": list(updater.DEFAULT_MANIFEST_URLS),
+        "remote_update.DEFAULT_FILE_URL_BASES": list(updater.DEFAULT_FILE_URL_BASES),
+        "remote_update_config_v250.json": [config["manifest_url"]] + list(config["manifest_urls"]),
+        "Log_checker.DEFAULT_REMOTE_MANIFEST_URLS": [lc.DEFAULT_REMOTE_MANIFEST_URL] + list(lc.DEFAULT_REMOTE_MANIFEST_URLS),
+        "Log_checker.SDK_CHECK_PRESETS_REMOTE_URLS": list(lc.SDK_CHECK_PRESETS_REMOTE_URLS),
+        "Log_checker.PACKAGE_LOG_PRESETS_REMOTE_URLS": list(lc.PACKAGE_LOG_PRESETS_REMOTE_URLS),
+        "sync_update_manifest.PAYLOAD_URL_BASES": list(sync.PAYLOAD_URL_BASES),
+    }
+    for name, urls in groups.items():
+        _assert("/indiezvn/Eventchecker" in urls[0], f"{name} must try the indiezvn repo first: {urls[0]}")
+        owners = ["indiezvn" if "/indiezvn/" in u else "trucbm" if "/trucbm/" in u else "?" for u in urls]
+        _assert("?" not in owners, f"{name} has an unknown repository: {urls}")
+        _assert("trucbm" in owners, f"{name} must keep a trucbm fallback")
+        first_old = owners.index("trucbm")
+        github_new = [u for u in urls if "/indiezvn/" in u and "jsdelivr" not in u]
+        _assert(all(urls.index(u) < first_old for u in github_new), f"{name}: every GitHub indiezvn URL must come before trucbm")
+    _assert('SERVICES_CHECKER_GITHUB_REPO = "indiezvn/Eventchecker"' in services, "Services Checker presets must read the indiezvn repo")
+    for doc in ("README_SETUP_TEAM.md", "README_SETUP_MAC.md", "README_SETUP_WINDOWS.md", "CODEX_SETUP_CHECKLIST.md"):
+        _assert("github.com/trucbm/Eventchecker" not in (ROOT / doc).read_text(encoding="utf-8"), f"{doc} still clones the old repository")
+
+    # If the company repo cannot be reached, the next (trucbm) URL is used.
+    calls = []
+    original_download = updater._download
+    original_delays = updater.DOWNLOAD_RETRY_DELAYS
+    try:
+        def fake_download(url, timeout):
+            calls.append(url)
+            if "/indiezvn/" in url:
+                raise OSError("indiezvn unreachable")
+            return b'{"version": "ok"}'
+        updater._download = fake_download
+        updater.DOWNLOAD_RETRY_DELAYS = (0, 0)
+        data, used = updater._download_first(updater.DEFAULT_MANIFEST_URLS, 5)
+        _assert("/trucbm/" in used and data, f"updater did not fall back to trucbm: {used}")
+        _assert("/indiezvn/" in calls[0], "updater must try indiezvn first")
+    finally:
+        updater._download = original_download
+        updater.DOWNLOAD_RETRY_DELAYS = original_delays
 
 
 def test_sdk_check_results_text_size() -> None:
@@ -5585,6 +5640,7 @@ TESTS: List[Callable[[], None]] = [
     test_ui_zoom_setting_contract,
     test_specific_filter_boxes_compact,
     test_sdk_check_results_text_size,
+    test_repository_moved_to_indiezvn,
     test_package_log_delta_ui_contract,
     test_main_script_has_unique_top_level_names,
     test_android_package_log_ignores_global_pause,

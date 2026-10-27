@@ -46,7 +46,7 @@ Codex can dam bao cac buoc sau:
 macOS / Linux:
 
 ```bash
-git clone https://github.com/trucbm/Eventchecker.git
+git clone https://github.com/indiezvn/Eventchecker.git
 cd Eventchecker
 python3 -m venv .venv
 source .venv/bin/activate
@@ -58,7 +58,7 @@ python desktop_app.py
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/trucbm/Eventchecker.git
+git clone https://github.com/indiezvn/Eventchecker.git
 cd Eventchecker
 py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -70,7 +70,7 @@ python desktop_app.py
 Windows CMD:
 
 ```bat
-git clone https://github.com/trucbm/Eventchecker.git
+git clone https://github.com/indiezvn/Eventchecker.git
 cd Eventchecker
 py -3 -m venv .venv
 .venv\Scripts\activate.bat

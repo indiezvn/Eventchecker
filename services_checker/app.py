@@ -1946,7 +1946,8 @@ PODFILE_LIB_MAPPING_FILENAME = "podfile_lib_mapping.json"
 # Reload report success while returning stale presets.
 SERVICES_CHECKER_PRESET_BRANCH = "main"
 SERVICES_CHECKER_PRESET_BRANCHES = (SERVICES_CHECKER_PRESET_BRANCH,)
-SERVICES_CHECKER_GITHUB_REPO = "trucbm/Eventchecker"
+# Moved to the company organization; the old trucbm path redirects here.
+SERVICES_CHECKER_GITHUB_REPO = "indiezvn/Eventchecker"
 SERVICES_CHECKER_GITHUB_API_URL = (
     f"https://api.github.com/repos/{SERVICES_CHECKER_GITHUB_REPO}/commits/"
     f"{SERVICES_CHECKER_PRESET_BRANCH}"

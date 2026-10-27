@@ -3,7 +3,7 @@
 set -u
 
 APP_SUPPORT_DIR="${HOME}/Library/Application Support/EventInspector"
-MANIFEST_URL="https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json"
+MANIFEST_URL="https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json"
 TARGET_VERSION="2026-10-21-9-2.5.0-82"
 
 echo "Event Inspector update reset (macOS)"
@@ -57,7 +57,10 @@ cat > "${CONFIG_FILE_V250}" <<JSON
   "manifest_url": "${MANIFEST_URL}",
   "manifest_urls": [
     "${MANIFEST_URL}",
+    "https://github.com/indiezvn/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
+    "https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json",
     "https://github.com/trucbm/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
+    "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@main/Updates_2_5/remote_manifest.json",
     "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@main/Updates_2_5/remote_manifest.json"
   ],
   "timeout_sec": 15,

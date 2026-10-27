@@ -41,7 +41,7 @@ adb devices
 PowerShell:
 
 ```powershell
-git clone https://github.com/trucbm/Eventchecker.git
+git clone https://github.com/indiezvn/Eventchecker.git
 cd Eventchecker
 ```
 

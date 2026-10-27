@@ -1,9 +1,12 @@
 {
   "enabled": true,
-  "manifest_url": "https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json",
+  "manifest_url": "https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json",
   "manifest_urls": [
+    "https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json",
+    "https://github.com/indiezvn/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
     "https://raw.githubusercontent.com/trucbm/Eventchecker/main/Updates_2_5/remote_manifest.json",
     "https://github.com/trucbm/Eventchecker/raw/main/Updates_2_5/remote_manifest.json",
+    "https://cdn.jsdelivr.net/gh/indiezvn/Eventchecker@main/Updates_2_5/remote_manifest.json",
     "https://cdn.jsdelivr.net/gh/trucbm/Eventchecker@main/Updates_2_5/remote_manifest.json"
   ],
   "timeout_sec": 120,
