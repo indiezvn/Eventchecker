@@ -4736,7 +4736,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(83)</title>
+    <title>Event Inspector v2.5.0(84)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4820,11 +4820,16 @@ HTML_TEMPLATE = """
         pre::-webkit-scrollbar { height: 6px; width: 6px; }
         pre::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
         pre::-webkit-scrollbar-track { background: #f1f5f9; }
+
+        /* Full-window layout: the visible tab fills the space below the tab bar */
+        #tabScrollArea { display: flex; flex-direction: column; }
+        #tabScrollArea > [id^="tabContent"]:not(.hidden) { flex: 1 0 auto; display: flex; flex-direction: column; }
+        #tabScrollArea > [id^="tabContent"]:not(.hidden) > div:last-child { flex: 1 0 auto; }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800 h-screen overflow-hidden">
 
-    <div class="container mx-auto p-3 sm:p-4 lg:p-6 h-full flex flex-col">
+    <div id="appShell" class="w-full max-w-none p-3 sm:p-4 lg:p-6 h-full flex flex-col">
         <!-- HEADER -->
         <div id="appHeader" class="bg-white rounded-xl shadow-md p-4 mb-4 flex-shrink-0{% if ui_hide_top %} hidden{% endif %}">
             <div class="flex justify-between items-center flex-wrap gap-4">
@@ -4832,7 +4837,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(83)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(84)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -4912,7 +4917,7 @@ HTML_TEMPLATE = """
         </div>
 
         <!-- CONTENT -->
-        <div class="flex-grow overflow-auto">
+        <div id="tabScrollArea" class="flex-grow overflow-auto">
 
             <!-- TAB 1: Load Ads -->
             <div id="tabContentLoadAds" class="hidden">

@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 83
+RELEASE_SOURCE_BUILD = 84
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2335,6 +2335,16 @@ def test_sdk_check_results_text_size() -> None:
     _assert('<pre class="font-mono ${sizeClass} leading-5" style="margin: 0; white-space: pre-wrap;">' in text, "SDK Check rows must have an explicit small text size")
     _assert("const sizeClass = res.status === 'LABEL' ? 'text-sm' : 'text-xs';" in text, "SDK Check label/row sizes changed")
     _assert('<pre style="font-family: monospace; margin: 0;' not in text, "unsized monospace <pre> is back in SDK Check")
+
+
+def test_full_window_layout() -> None:
+    """The app shell spans the whole window and the visible tab fills the height below the tab bar."""
+    text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
+    _assert('<div class="container mx-auto' not in text, "the width-capped container is back")
+    _assert('<div id="appShell" class="w-full max-w-none p-3 sm:p-4 lg:p-6 h-full flex flex-col">' in text, "app shell must be full width")
+    _assert('<div id="tabScrollArea" class="flex-grow overflow-auto">' in text, "tab area id missing")
+    _assert('#tabScrollArea > [id^="tabContent"]:not(.hidden) { flex: 1 0 auto; display: flex; flex-direction: column; }' in text, "visible tab must fill the height")
+    _assert('#tabScrollArea > [id^="tabContent"]:not(.hidden) > div:last-child { flex: 1 0 auto; }' in text, "last card of the visible tab must stretch")
 
 
 def test_specific_filter_boxes_compact() -> None:
@@ -5639,6 +5649,7 @@ TESTS: List[Callable[[], None]] = [
     test_live_tables_ui_contract,
     test_ui_zoom_setting_contract,
     test_specific_filter_boxes_compact,
+    test_full_window_layout,
     test_sdk_check_results_text_size,
     test_repository_moved_to_indiezvn,
     test_package_log_delta_ui_contract,
