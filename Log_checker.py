@@ -4739,7 +4739,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(87)</title>
+    <title>Event Inspector v2.5.0(88)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4852,7 +4852,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(87)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(88)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5461,15 +5461,6 @@ HTML_TEMPLATE = """
                         <button id="perfSessionsBtn" type="button" data-perf-help="sessions" class="bg-slate-600 hover:bg-slate-700 text-white font-semibold py-1.5 px-3 rounded text-xs">Recorded sessions</button>
                         <span id="perfStatus" class="text-xs text-gray-500 ml-1" role="status">Connect an Android or iOS device by USB, open the game, then Start.</span>
                     </div>
-                    <div id="perfIosToolBanner" class="hidden flex flex-col gap-1.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-lg px-3 py-2 text-xs">
-                        <div class="font-semibold" id="perfIosToolTitle">Máy tính này chưa có pymobiledevice3 nên chưa đo được iPhone.</div>
-                        <div id="perfIosToolSteps"></div>
-                        <div id="perfIosToolCommands" class="flex flex-col gap-1"></div>
-                        <div class="flex flex-wrap items-center gap-2">
-                            <button id="perfIosToolRecheck" type="button" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-1 px-2.5 rounded">Check again</button>
-                            <span id="perfIosToolInfo" class="text-amber-800"></span>
-                        </div>
-                    </div>
                     <div id="perfViewBanner" class="hidden flex flex-wrap items-center gap-2 bg-amber-50 border border-amber-300 text-amber-900 rounded-lg px-3 py-2 text-xs">
                         <span class="font-semibold">Viewing a saved session:</span>
                         <span id="perfViewInfo"></span>
@@ -5498,15 +5489,6 @@ HTML_TEMPLATE = """
                         </div>
                         <div class="perf-chart-wrap"><canvas id="perfMemChart" class="perf-chart" style="height: 260px;" aria-label="Memory over time"></canvas><div class="perf-tooltip hidden"></div></div>
                     </div>
-                </div>
-            </div>
-
-            <div id="perfIosToolToast" class="hidden fixed bottom-4 right-4 z-[65] max-w-sm bg-white border border-amber-300 shadow-lg rounded-lg p-3 text-xs text-gray-800">
-                <div class="font-semibold text-amber-800 mb-1">Thiếu pymobiledevice3 trên máy này</div>
-                <div class="mb-2">Tab Performance cần nó để đo FPS/RAM trên iPhone (Android không cần). Cài một lần là dùng được.</div>
-                <div class="flex gap-2 justify-end">
-                    <button id="perfIosToastHide" type="button" class="text-gray-500 hover:text-gray-800 font-semibold py-1 px-2">Không nhắc lại</button>
-                    <button id="perfIosToastShow" type="button" class="bg-amber-500 hover:bg-amber-600 text-white font-semibold py-1 px-2.5 rounded">Xem cách cài</button>
                 </div>
             </div>
 
@@ -9921,7 +9903,6 @@ HTML_TEMPLATE = """
                 .map(s => `<span class="flex items-center gap-1" data-perf-help="mem_${s.key}"><span class="inline-block w-3 h-[3px] rounded" style="background:${s.color}"></span>${s.label}</span>`).join('');
             const main = perfMemMain();
             const ios = perf.platform === 'ios';
-            perfRenderIosTool();
             // iOS targets the bundle name, like Package Logcat (e.g. PixelArt); Android the package.
             document.getElementById('perfPackageLabel').firstChild.nodeValue = ios ? 'Bundle:' : 'Package:';
             document.getElementById('perfPackageInput').placeholder = ios ? 'PixelArt' : 'com.example.game';
@@ -10194,8 +10175,6 @@ HTML_TEMPLATE = """
         }
 
         function perfOnTabShown() {
-            document.getElementById('perfIosToolToast').classList.add('hidden');
-            perfCheckIosTool();
             perfLoadDevices();
             perfPoll();
             perfEnsurePolling();
@@ -10373,81 +10352,6 @@ HTML_TEMPLATE = """
             perfOpenSessions();
         });
 
-        // --- pymobiledevice3 (iOS) check: banner in the tab, one reminder per machine when iOS is used ---
-        const PERF_IOS_TOAST_KEY = 'eventinspector.perfIosToolReminderOff';
-        let perfIosTool = null;
-
-        function perfRenderIosTool() {
-            const banner = document.getElementById('perfIosToolBanner');
-            const missing = perfIosTool && !perfIosTool.installed;
-            banner.classList.toggle('hidden', !(missing && perf.platform === 'ios'));
-            if (!missing) return;
-            const win = perfIosTool.platform === 'windows';
-            document.getElementById('perfIosToolTitle').textContent = perfIosTool.outdated
-                ? 'pymobiledevice3 trên máy này quá cũ (cần bản 9.30 trở lên) nên chưa đo được iPhone.'
-                : 'Máy tính này chưa có pymobiledevice3 nên chưa đo được iPhone.';
-            const steps = [];
-            if (!perfIosTool.python_found) {
-                steps.push(win ? '1. Cài Python 3.10 trở lên từ python.org (tick "Add python.exe to PATH").' : '1. Cài Python 3.10 trở lên từ python.org.');
-                steps.push('2. Chạy lệnh cài của nền tảng bên dưới (macOS: Terminal, Windows: Command Prompt), rồi bấm Check again.');
-            } else {
-                steps.push('Chạy lệnh cài của nền tảng bên dưới (macOS: Terminal, Windows: Command Prompt; khoảng 1 phút), rồi bấm Check again.');
-            }
-            steps.push('iPhone cần cắm cáp USB và bật Developer Mode (Cài đặt › Quyền riêng tư & Bảo mật).' + (win ? ' Windows cần có iTunes hoặc Apple Devices.' : ''));
-            document.getElementById('perfIosToolSteps').innerHTML = steps.map(s => `<div>${escapeHTML(s)}</div>`).join('');
-            // One install command per platform; this machine's uses the Python we will look in.
-            const commands = [
-                { name: 'macOS', current: !win, cmd: (!win && perfIosTool.install_command) || 'python3 -m pip install --user -U pymobiledevice3' },
-                { name: 'Windows', current: win, cmd: (win && perfIosTool.install_command) || 'py -m pip install --user -U pymobiledevice3' },
-            ];
-            document.getElementById('perfIosToolCommands').innerHTML = commands.map(c => `
-                <div class="flex flex-wrap items-center gap-2 ${c.current ? '' : 'opacity-70'}">
-                    <span class="w-32 font-semibold whitespace-nowrap">${c.name}${c.current ? ' (máy này)' : ''}</span>
-                    <code class="bg-white border border-amber-300 rounded px-2 py-1 font-mono text-[11px] select-all">${escapeHTML(c.cmd)}</code>
-                    <button type="button" class="perf-ios-copy bg-white hover:bg-amber-100 border border-amber-400 font-semibold py-1 px-2.5 rounded" data-cmd="${escapeHTML(c.cmd)}">Copy</button>
-                </div>`).join('');
-            document.getElementById('perfIosToolInfo').textContent = perfIosTool.python_found ? `Python ${perfIosTool.python_version}: ${perfIosTool.python_found}` : 'Chưa tìm thấy Python 3.9+';
-        }
-
-        async function perfCheckIosTool(refresh = false) {
-            try {
-                perfIosTool = await (await fetch(`/api/perf/ios-tool${refresh ? '?refresh=1' : ''}`)).json();
-            } catch (e) {
-                return;
-            }
-            perfRenderIosTool();
-            let reminderOff = false;
-            try { reminderOff = localStorage.getItem(PERF_IOS_TOAST_KEY) === '1'; } catch (e) {}
-            const toast = document.getElementById('perfIosToolToast');
-            const inPerformance = !document.getElementById('tabContentPerformance').classList.contains('hidden');
-            // Only machines that use iOS get the reminder; Android needs nothing extra.
-            const onIos = typeof activePlatform !== 'undefined' && activePlatform === 'ios';
-            toast.classList.toggle('hidden', !(perfIosTool && !perfIosTool.installed && !reminderOff && !inPerformance && onIos));
-        }
-
-        document.getElementById('perfIosToolCommands').addEventListener('click', async (e) => {
-            const btn = e.target.closest('.perf-ios-copy');
-            if (!btn) return;
-            const ok = await copyTextToClipboard(btn.dataset.cmd);
-            btn.textContent = ok ? 'Copied' : 'Copy failed';
-            setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-        });
-        document.getElementById('perfIosToolRecheck').addEventListener('click', async () => {
-            const btn = document.getElementById('perfIosToolRecheck');
-            btn.disabled = true; btn.textContent = 'Checking…';
-            await perfCheckIosTool(true);
-            btn.disabled = false; btn.textContent = 'Check again';
-            if (perfIosTool && perfIosTool.installed) perfSetStatus(`pymobiledevice3 ${perfIosTool.version} found. iOS is ready.`, 'live');
-        });
-        document.getElementById('perfIosToastHide').addEventListener('click', () => {
-            try { localStorage.setItem(PERF_IOS_TOAST_KEY, '1'); } catch (e) {}
-            document.getElementById('perfIosToolToast').classList.add('hidden');
-        });
-        document.getElementById('perfIosToastShow').addEventListener('click', () => {
-            document.getElementById('perfIosToolToast').classList.add('hidden');
-            switchTab('Performance');
-        });
-
         // Plain-language help: click the ? (or hover the item for 3 s); click outside or Esc closes it
         const PERF_HELP_HOVER_MS = 3000;
         const PERF_HELP = {
@@ -10558,12 +10462,7 @@ HTML_TEMPLATE = """
         socket.on('device_status', (status) => {
             const key = `${status?.platform}:${(status?.connected_devices || []).map(d => d.id).sort().join(',')}`;
             if (key === perfDeviceKey) return;
-            const platformChanged = perfDeviceKey.split(':')[0] !== String(status?.platform);
             perfDeviceKey = key;
-            if (platformChanged) {
-                if (status?.platform === 'ios') perfCheckIosTool();
-                else document.getElementById('perfIosToolToast').classList.add('hidden');
-            }
             if (!document.getElementById('tabContentPerformance').classList.contains('hidden')) perfLoadDevices();
         });
 
@@ -11531,10 +11430,8 @@ def _perf_python_from_launcher(tool_path, head):
     return parts[0] if parts else ""
 
 
-def _perf_launcher_python():
-    """The interpreter behind an installed `pymobiledevice3` command, if any."""
-    tool = (os.environ.get("EVENTINSPECTOR_PYMOBILEDEVICE3") or _resolve_ios_tool("pymobiledevice3")
-            or shutil.which("pymobiledevice3") or _perf_existing(os.path.expanduser("~/.local/bin/pymobiledevice3")))
+def _perf_ios_python():
+    tool = os.environ.get("EVENTINSPECTOR_PYMOBILEDEVICE3") or _resolve_ios_tool("pymobiledevice3") or shutil.which("pymobiledevice3")
     if not tool or not os.path.exists(tool):
         return ""
     try:
@@ -11543,125 +11440,6 @@ def _perf_launcher_python():
     except OSError:
         return ""
     return _perf_python_from_launcher(tool, head)
-
-
-def _perf_existing(path):
-    return path if path and os.path.exists(path) else ""
-
-
-# Imports exactly what the helper needs (the no-root userspace tunnel came in
-# pymobiledevice3 9.30), then reports the interpreter and the package version.
-PERF_IOS_PROBE_CODE = (
-    "import sys, importlib.metadata as m\n"
-    "from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel\n"
-    "print(sys.executable); print(m.version('pymobiledevice3'))"
-)
-PERF_PYTHON_PROBE_CODE = "import sys; print(sys.executable); print('%d.%d' % sys.version_info[:2])"
-PERF_IOS_TOOL_CACHE_SECONDS = 300
-PERF_IOS_MIN_PYTHON = (3, 9)
-_perf_ios_tool_lock = threading.Lock()
-_perf_ios_tool_state = {"checked_at": 0.0, "status": None, "checking": False}
-
-
-def _perf_python_candidates():
-    """Interpreters that may have pymobiledevice3: the CLI's own Python first, then the usual installs.
-
-    Skips the stubs that pop up an installer when run (macOS /usr/bin/python3
-    without the Command Line Tools, the Windows Store "python" alias).
-    """
-    candidates = []
-
-    def add(command):
-        if command and command[0] and command not in candidates:
-            if "WindowsApps" in command[0]:
-                return
-            if command[0] == "/usr/bin/python3" and not os.path.exists("/Library/Developer/CommandLineTools/usr/bin/python3") \
-                    and not os.path.exists("/Applications/Xcode.app"):
-                return
-            candidates.append(command)
-
-    add([_perf_launcher_python()])
-    if sys.platform.startswith("win"):
-        local = os.environ.get("LOCALAPPDATA", "")
-        for exe in sorted(glob.glob(os.path.join(local, "Programs", "Python", "Python3*", "python.exe")), reverse=True):
-            add([exe])
-        if shutil.which("py"):
-            add(["py", "-3"])
-        add([shutil.which("python") or ""])
-    else:
-        for exe in sorted(glob.glob("/Library/Frameworks/Python.framework/Versions/3.*/bin/python3"), reverse=True):
-            add([exe])
-        add([shutil.which("python3") or ""])
-        for exe in ("/usr/local/bin/python3", "/opt/homebrew/bin/python3", "/usr/bin/python3"):
-            add([_perf_existing(exe)])
-    return candidates
-
-
-def _perf_install_command(python):
-    """The pip command for this machine, run with the interpreter we will look in."""
-    quoted = f'"{python}"' if " " in python else python
-    # Homebrew's Python refuses `pip install --user` (PEP 668) unless told otherwise.
-    extra = " --break-system-packages" if python.startswith(("/opt/homebrew", "/usr/local/Cellar", "/usr/local/opt")) else ""
-    return f"{quoted} -m pip install --user -U{extra} pymobiledevice3"
-
-
-def _perf_detect_ios_tool():
-    """Find a Python with a recent enough pymobiledevice3; otherwise say what to install."""
-    status = {"installed": False, "python": "", "version": "", "outdated": False, "python_found": "",
-              "python_version": "", "install_command": "", "platform": "windows" if sys.platform.startswith("win") else "mac"}
-    for command in _perf_python_candidates():
-        try:
-            probe = subprocess.run(command + ["-c", PERF_IOS_PROBE_CODE], capture_output=True, text=True,
-                                   timeout=30, creationflags=creation_flags)
-        except Exception:
-            continue
-        lines = [line.strip() for line in (probe.stdout or "").splitlines() if line.strip()]
-        if probe.returncode == 0 and len(lines) >= 2:
-            status.update({"installed": True, "python": lines[0], "version": lines[1]})
-            return status
-        error = probe.stderr or ""
-        if "No module named 'pymobiledevice3." in error or "cannot import name 'UserspaceRsdTunnel'" in error:
-            status["outdated"] = True
-        if not status["python_found"]:
-            try:
-                info = subprocess.run(command + ["-c", PERF_PYTHON_PROBE_CODE], capture_output=True, text=True,
-                                      timeout=15, creationflags=creation_flags)
-            except Exception:
-                continue
-            found = [line.strip() for line in (info.stdout or "").splitlines() if line.strip()]
-            if info.returncode == 0 and len(found) >= 2:
-                major, minor = (int(part) for part in found[1].split(".")[:2])
-                if (major, minor) >= PERF_IOS_MIN_PYTHON:
-                    status.update({"python_found": found[0], "python_version": found[1]})
-    if status["python_found"]:
-        status["install_command"] = _perf_install_command(status["python_found"])
-    return status
-
-
-def _perf_ios_tool_status(refresh=False, wait=True):
-    """Cached detection (it runs a few interpreters, so not on every request)."""
-    with _perf_ios_tool_lock:
-        cached = _perf_ios_tool_state["status"]
-        fresh = cached is not None and time.time() - _perf_ios_tool_state["checked_at"] < PERF_IOS_TOOL_CACHE_SECONDS
-        if fresh and not refresh:
-            return cached
-        if not wait:
-            return cached
-    status = _perf_detect_ios_tool()
-    with _perf_ios_tool_lock:
-        _perf_ios_tool_state.update({"checked_at": time.time(), "status": status})
-    return status
-
-
-def _perf_ios_python():
-    status = _perf_ios_tool_status()
-    return status["python"] if status and status.get("installed") else ""
-
-
-@app.get('/api/perf/ios-tool')
-def perf_ios_tool_api():
-    refresh = request.args.get("refresh") == "1"
-    return jsonify({"ok": True, **_perf_ios_tool_status(refresh=refresh)})
 
 
 def _perf_ios_foreground_package(device_id):
@@ -12017,16 +11795,6 @@ def _perf_session_file(session_id):
 
 
 _perf_summary_cache = {}
-
-
-def _perf_warm_ios_tool_status():
-    try:
-        _perf_ios_tool_status()
-    except Exception as exc:
-        logging.warning("pymobiledevice3 detection failed: %s", exc)
-
-
-threading.Thread(target=_perf_warm_ios_tool_status, daemon=True).start()
 
 
 @app.get('/api/perf/sessions')
