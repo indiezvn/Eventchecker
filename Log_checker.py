@@ -4739,7 +4739,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(89)</title>
+    <title>Event Inspector v2.5.0(90)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4852,7 +4852,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(89)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(90)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -6210,20 +6210,7 @@ HTML_TEMPLATE = """
             } finally {
                 document.body.removeChild(textarea);
             }
-            if (copied) return true;
-            // The Windows app (Qt WebEngine) blocks both ways above; the local
-            // server on the same computer sets the clipboard instead.
-            if (['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {
-                try {
-                    const res = await fetch('/api/clipboard', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: value }),
-                    });
-                    return !!(await res.json()).ok;
-                } catch (err) {
-                    console.warn('Server clipboard failed', err);
-                }
-            }
-            return false;
+            return copied;
         }
 
         function showPlatformModal() {
@@ -10461,17 +10448,8 @@ HTML_TEMPLATE = """
             const btn = e.target.closest('.perf-ios-copy');
             if (!btn) return;
             const ok = await copyTextToClipboard(btn.dataset.cmd);
-            if (!ok) {
-                // Select the command so Ctrl/Cmd+C works by hand.
-                const code = btn.parentElement.querySelector('code');
-                const range = document.createRange();
-                range.selectNodeContents(code);
-                const selection = window.getSelection();
-                selection.removeAllRanges();
-                selection.addRange(range);
-            }
-            btn.textContent = ok ? 'Copied' : 'Selected: press Ctrl+C';
-            setTimeout(() => { btn.textContent = 'Copy'; }, ok ? 1500 : 4000);
+            btn.textContent = ok ? 'Copied' : 'Copy failed';
+            setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
         });
         document.getElementById('perfIosToolRecheck').addEventListener('click', async () => {
             const btn = document.getElementById('perfIosToolRecheck');
@@ -12211,91 +12189,6 @@ def perf_status_api():
             "capture_dir": perf_state["capture_dir"],
             "captures": list(perf_state["captures"]),
         })
-
-
-# --- CLIPBOARD (desktop app) ---
-# The Windows app renders with Qt WebEngine, which blocks page JavaScript from
-# writing the clipboard (both navigator.clipboard and execCommand('copy')).
-# The local server runs on the same computer, so Copy buttons fall back to it.
-CLIPBOARD_MAX_CHARS = 100000
-
-
-def _set_windows_clipboard(text):
-    import ctypes
-    from ctypes import wintypes
-    cf_unicodetext, gmem_moveable = 13, 0x0002
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    user32.OpenClipboard.argtypes = [wintypes.HWND]
-    user32.OpenClipboard.restype = wintypes.BOOL
-    user32.EmptyClipboard.restype = wintypes.BOOL
-    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
-    user32.SetClipboardData.restype = wintypes.HANDLE
-    user32.CloseClipboard.restype = wintypes.BOOL
-    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
-    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-    kernel32.GlobalLock.restype = wintypes.LPVOID
-    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-    kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
-    data = text.encode("utf-16-le") + b"\x00\x00"
-    for _ in range(20):  # another app may hold the clipboard for a moment
-        if user32.OpenClipboard(None):
-            break
-        time.sleep(0.05)
-    else:
-        raise RuntimeError("clipboard is busy")
-    try:
-        user32.EmptyClipboard()
-        handle = kernel32.GlobalAlloc(gmem_moveable, len(data))
-        if not handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        pointer = kernel32.GlobalLock(handle)
-        ctypes.memmove(pointer, data, len(data))
-        kernel32.GlobalUnlock(handle)
-        if not user32.SetClipboardData(cf_unicodetext, handle):
-            kernel32.GlobalFree(handle)
-            raise ctypes.WinError(ctypes.get_last_error())
-    finally:
-        user32.CloseClipboard()
-
-
-def _set_system_clipboard(text):
-    if sys.platform.startswith("win"):
-        try:
-            _set_windows_clipboard(text)
-            return
-        except Exception as exc:
-            logging.warning("Win32 clipboard failed, using clip.exe: %s", exc)
-            # clip.exe reads UTF-16LE when the input starts with a byte-order mark.
-            subprocess.run(["clip"], input=b"\xff\xfe" + text.encode("utf-16-le"), check=True, timeout=10,
-                           creationflags=creation_flags)
-            return
-    if sys.platform == "darwin":
-        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True, timeout=10,
-                       env={**os.environ, "LANG": "en_US.UTF-8"})
-        return
-    for command in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
-        if shutil.which(command[0]):
-            subprocess.run(command, input=text.encode("utf-8"), check=True, timeout=10)
-            return
-    raise RuntimeError("no clipboard tool")
-
-
-@app.post('/api/clipboard')
-def clipboard_api():
-    # Only the app's own window (same computer) may set this computer's clipboard.
-    if request.remote_addr not in ("127.0.0.1", "::1"):
-        return jsonify({"ok": False, "error": "local_only"}), 403
-    text = str((request.get_json(silent=True) or {}).get("text") or "")
-    if not text or len(text) > CLIPBOARD_MAX_CHARS:
-        return jsonify({"ok": False, "error": "invalid_text"}), 400
-    try:
-        _set_system_clipboard(text)
-    except Exception as exc:
-        logging.warning("Clipboard copy failed: %s", exc)
-        return jsonify({"ok": False, "error": "clipboard_failed"}), 500
-    return jsonify({"ok": True})
 
 
 # INDIEZ logo shown in the footer, embedded so it ships inside the remote-update payload

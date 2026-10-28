@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 89
+RELEASE_SOURCE_BUILD = 90
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2719,33 +2719,6 @@ def test_performance_restart_on_game_switch() -> None:
             lc.connected_devices_info = original_devices
             lc._perf_ios_python = original_python
             lc._perf_sessions_root = original_root
-
-
-def test_clipboard_fallback_for_windows_app() -> None:
-    """Copy buttons fall back to the local server's clipboard (Qt WebEngine blocks page clipboard writes)."""
-    client = lc.app.test_client()
-    original = lc._set_system_clipboard
-    copied = []
-    try:
-        lc._set_system_clipboard = lambda text: copied.append(text)
-        res = client.post("/api/clipboard", json={"text": "py -m pip install --user -U pymobiledevice3"})
-        _assert_equal((res.status_code, copied), (200, ["py -m pip install --user -U pymobiledevice3"]), "the app window can copy")
-        res = client.post("/api/clipboard", json={"text": "x"}, environ_base={"REMOTE_ADDR": "192.168.1.20"})
-        _assert_equal((res.status_code, len(copied)), (403, 1), "a LAN browser cannot set this computer's clipboard")
-        _assert_equal(client.post("/api/clipboard", json={"text": ""}).status_code, 400, "empty text is refused")
-        def boom(text):
-            raise RuntimeError("no clipboard")
-        lc._set_system_clipboard = boom
-        _assert_equal(client.post("/api/clipboard", json={"text": "x"}).status_code, 500, "a failing clipboard reports an error")
-    finally:
-        lc._set_system_clipboard = original
-    html = client.get("/").get_data(as_text=True)
-    for needle in ("if (['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)) {", "fetch('/api/clipboard', {",
-                   "btn.textContent = ok ? 'Copied' : 'Selected: press Ctrl+C';"):
-        _assert(needle in html, f"clipboard fallback is missing {needle}")
-    source = (ROOT / "Log_checker.py").read_text(encoding="utf-8")
-    _assert("def _set_windows_clipboard(text):" in source and "cf_unicodetext, gmem_moveable = 13, 0x0002" in source,
-            "Windows uses the Win32 clipboard API (clip.exe as a fallback)")
 
 
 def test_performance_help_tooltips() -> None:
@@ -6173,7 +6146,6 @@ TESTS: List[Callable[[], None]] = [
     test_performance_ios_monitor,
     test_performance_ios_tool_detection,
     test_performance_restart_on_game_switch,
-    test_clipboard_fallback_for_windows_app,
     test_sdk_check_results_text_size,
     test_repository_moved_to_indiezvn,
     test_package_log_delta_ui_contract,
