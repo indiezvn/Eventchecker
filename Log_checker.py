@@ -4739,7 +4739,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(87)</title>
+    <title>Event Inspector v2.5.0(88)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4852,7 +4852,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(87)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(88)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -9881,9 +9881,9 @@ HTML_TEMPLATE = """
         const perfMemMain = () => PERF_MEM_MAIN[perf.platform] || PERF_MEM_MAIN.android;
         const PERF_FPS_SERIES = [{ key: 'fps', label: 'FPS', color: '#2a78d6' }];
         const PERF_ERROR_TEXT = {
-            app_not_running: 'The app is not running on the device.',
+            app_not_running: 'The app is not running on the device. Switched game? Pick it (Use open app / Quick select) and press Restart.',
             layer_not_found: 'Cannot find the game screen yet. Open the game on the device.',
-            game_not_drawing: 'The game is not drawing (0 FPS): an ad or another screen is on top, the app is in the background, or it is paused.',
+            game_not_drawing: 'The game is not drawing (0 FPS): an ad or another screen is on top, the app is in the background, or it is paused. Switched game? Pick it and press Restart.',
             ios_connecting: 'Connecting to the iPhone…',
             ios_disconnected: 'Lost the connection to the iPhone. Check the USB cable, then Start again.',
             ios_tool_missing: 'iOS needs pymobiledevice3 on this computer: run "pip3 install pymobiledevice3", then Start again.',
@@ -9931,7 +9931,7 @@ HTML_TEMPLATE = """
             document.getElementById('perfMemNote').textContent = main.note;
             perfInitHelp();
         }
-        const perf = { session: 0, total: 0, running: false, viewing: null, platform: 'android', samples: [], memSamples: [], captures: [], captureThreshold: 0, timer: null, hover: {} };
+        const perf = { session: 0, total: 0, running: false, sessionPackage: '', sessionDevice: '', viewing: null, platform: 'android', samples: [], memSamples: [], captures: [], captureThreshold: 0, timer: null, hover: {} };
 
         function perfFormatTime(seconds) {
             const s = Math.max(0, Math.round(seconds));
@@ -10114,12 +10114,23 @@ HTML_TEMPLATE = """
             el.className = `text-xs ml-1 ${tone === 'error' ? 'text-red-600' : tone === 'live' ? 'text-green-700' : 'text-gray-500'}`;
         }
 
-        function perfSyncControls(running) {
+        // While recording, a different game (or device) in the inputs turns Stop into
+        // Restart: one click saves the current session and starts the new one.
+        function perfWantsRestart() {
+            if (!perf.running) return false;
+            const pkg = document.getElementById('perfPackageInput').value.trim();
+            const device = document.getElementById('perfDeviceSelect').value;
+            return (!!pkg && pkg !== perf.sessionPackage) || (!!device && device !== perf.sessionDevice);
+        }
+
+        function perfSyncControls(running = perf.running) {
             const btn = document.getElementById('perfStartBtn');
-            btn.textContent = running ? 'Stop' : 'Start';
+            const restart = running && perfWantsRestart();
+            btn.textContent = restart ? 'Restart' : running ? 'Stop' : 'Start';
+            btn.title = restart ? 'Save the current session and start recording the game in the box' : '';
             // Clearing deletes the project's folders, so it waits until recording stops.
             document.getElementById('perfClearCapturesBtn').disabled = !!running;
-            btn.className = `${running ? 'bg-red-500 hover:bg-red-600' : 'bg-indigo-600 hover:bg-indigo-700'} text-white font-semibold py-1.5 px-4 rounded shadow text-xs`;
+            btn.className = `${restart ? 'bg-amber-500 hover:bg-amber-600' : running ? 'bg-red-500 hover:bg-red-600' : 'bg-indigo-600 hover:bg-indigo-700'} text-white font-semibold py-1.5 px-4 rounded shadow text-xs`;
         }
 
         function perfAddSamples(list) {
@@ -10136,6 +10147,8 @@ HTML_TEMPLATE = """
                 if (perf.viewing) {
                     // A saved session is on screen: keep it, only follow the recorder's state.
                     perf.running = data.running;
+                    perf.sessionPackage = data.package || '';
+                    perf.sessionDevice = data.device || '';
                     perfSyncControls(data.running);
                     return;
                 }
@@ -10146,6 +10159,8 @@ HTML_TEMPLATE = """
                 perfAddSamples(data.samples);
                 perf.total = data.total;
                 perf.running = data.running;
+                perf.sessionPackage = data.package || '';
+                perf.sessionDevice = data.device || '';
                 if (data.session) perf.platform = data.platform || 'android';
                 perf.captures = data.captures || [];
                 perf.captureThreshold = data.capture_threshold || 0;
@@ -10208,6 +10223,7 @@ HTML_TEMPLATE = """
             const data = await (await fetch(`/api/perf/foreground?device=${encodeURIComponent(device)}`)).json();
             if (data.ok && data.package) {
                 document.getElementById('perfPackageInput').value = data.package;
+                perfSyncControls();
                 perfSetStatus(`Open app: ${data.package}`, 'idle');
             } else {
                 perfSetStatus(data.error ? `Could not read the open app: ${perfErrorText(data.error)}` : 'No app is open on the device.', 'error');
@@ -10216,7 +10232,7 @@ HTML_TEMPLATE = """
 
         document.getElementById('perfStartBtn').addEventListener('click', async () => {
             if (perf.viewing) perfLeaveSaved(false);
-            if (perf.running) {
+            if (perf.running && !perfWantsRestart()) {
                 await fetch('/api/perf/stop', { method: 'POST' });
                 perf.running = false;
                 return perfPoll();
@@ -10255,7 +10271,10 @@ HTML_TEMPLATE = """
         document.getElementById('perfPresetSelect').addEventListener('change', (e) => {
             if (e.target.value) document.getElementById('perfPackageInput').value = e.target.value;
             e.target.value = '';
+            perfSyncControls();
         });
+        document.getElementById('perfPackageInput').addEventListener('input', () => perfSyncControls());
+        document.getElementById('perfDeviceSelect').addEventListener('change', () => perfSyncControls());
 
         document.getElementById('perfClearCapturesBtn').addEventListener('click', async () => {
             const pkg = document.getElementById('perfPackageInput').value.trim();
@@ -10455,7 +10474,7 @@ HTML_TEMPLATE = """
             package: ['Package / Bundle', 'Game cần đo. Android: package, ví dụ com.indiez.nonogram. iOS: tên bundle giống tab Package Logcat, ví dụ PixelArt. Bấm "Use open app" hoặc chọn ở Quick select để tự điền.'],
             preset: ['Quick select', 'Chọn nhanh project từ danh sách của tab Package Logcat; tự đổi theo nền tảng đang chọn (Android/iOS).'],
             foreground: ['Use open app', 'Tự điền Package bằng app đang mở trên điện thoại. Mở game trên máy trước rồi bấm nút này.'],
-            start: ['Start / Stop', 'Bắt đầu hoặc dừng ghi. Khi đang ghi, tool đo mỗi giây một lần. Bấm Start lần nữa sẽ bắt đầu phiên mới, số liệu cũ trên màn hình được xoá.'],
+            start: ['Start / Stop / Restart', 'Bắt đầu hoặc dừng ghi. Khi đang ghi, tool đo mỗi giây một lần. Đang ghi mà đổi game (Use open app, Quick select hoặc gõ tên) hay đổi máy thì nút thành Restart: bấm là lưu phiên cũ và bắt đầu phiên mới cho game mới, chart bắt đầu lại từ đầu.'],
             capture: ['Capture when FPS ≤', 'Bật ô này để tool tự chụp màn hình điện thoại khi FPS giảm bằng hoặc thấp hơn con số đã đặt. Hai lần chụp cách nhau ít nhất 5 giây. Gợi ý: máy 60Hz đặt khoảng 40. Khi bật ô này tool chụp sẵn liên tục (khoảng 1 ảnh/giây) và lưu đúng ảnh trong giây bị tụt, không phải ảnh sau khi game đã hồi lại. Trên Android việc chụp sẵn làm tăng nhẹ số Jank (khoảng 0,4 khung/giây); tắt ô này khi cần đo Jank chính xác. Tên ảnh: <thời điểm>_fps<FPS trung bình của giây đó>_slow<khung chậm nhất, ms> (slow chỉ có trên Android). Số FPS game tự hiện trên màn hình là của khung hình lúc đó nên thường khác số trung bình. Giây tool đang đọc RAM chi tiết (Android, mỗi 10 giây) không bao giờ bị chụp.'],
             sessions: ['Recorded sessions', 'Mỗi lần bấm Start, phiên đo được tự lưu thành một file (lưu mỗi 10 giây và lưu lần cuối khi Stop), nên rút cáp, tắt app hay app bị crash giữa chừng vẫn giữ được dữ liệu. Mở danh sách để Load xem lại chart, hoặc Delete. Khi đang xem phiên cũ, bấm "Back to live" để quay lại phiên đang đo.'],
             clear_captures: ['Clear captures', 'Xoá toàn bộ ảnh đã chụp của project đang chọn ở ô Package / Bundle (mọi phiên của project đó). Ảnh của project khác giữ nguyên. Tool hỏi xác nhận trước khi xoá và không xoá được khi đang ghi project đó.'],
