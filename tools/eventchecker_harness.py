@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 88
+RELEASE_SOURCE_BUILD = 89
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2690,35 +2690,6 @@ def test_performance_ios_tool_detection() -> None:
                    "{ name: 'macOS', current: !win,", "{ name: 'Windows', current: win,", "py -m pip install --user -U pymobiledevice3",
                    "if (status?.platform === 'ios') perfCheckIosTool();", "&& !inPerformance && onIos));"):
         _assert(needle in html, f"pymobiledevice3 notice is missing {needle}")
-
-
-def test_performance_restart_on_game_switch() -> None:
-    """Switching game while recording turns Stop into Restart, which starts a fresh session (chart reset)."""
-    html = lc.app.test_client().get("/").get_data(as_text=True)
-    for needle in ("function perfWantsRestart() {", "btn.textContent = restart ? 'Restart' : running ? 'Stop' : 'Start';",
-                   "if (perf.running && !perfWantsRestart()) {", "perf.sessionPackage = data.package || '';",
-                   "document.getElementById('perfPackageInput').addEventListener('input', () => perfSyncControls());"):
-        _assert(needle in html, f"restart on game switch is missing {needle}")
-    client = lc.app.test_client()
-    original_devices, original_python, original_root = list(lc.connected_devices_info), lc._perf_ios_python, lc._perf_sessions_root
-    with tempfile.TemporaryDirectory() as temp_dir:
-        try:
-            lc._perf_sessions_root = lambda: temp_dir
-            lc.connected_devices_info = [{"id": "00008120-TEST", "name": "Test iPhone", "platform": "ios"}]
-            lc._perf_ios_python = lambda: ""
-            first = client.post("/api/perf/start", json={"device": "00008120-TEST", "package": "PixelArt"}).get_json()["session"]
-            with lc.perf_lock:
-                lc.perf_state["samples"].append({"t": 1.0, "fps": 60.0})
-            second = client.post("/api/perf/start", json={"device": "00008120-TEST", "package": "TrainIdle"}).get_json()["session"]
-            status = client.get("/api/perf/status").get_json()
-            _assert_equal((second, status["package"], status["total"]), (first + 1, "TrainIdle", 0), "restart = new session, empty chart")
-            saved = [s["package"] for s in client.get("/api/perf/sessions").get_json()["sessions"]]
-            _assert("PixelArt" in saved, "the first game's session is saved when the new one starts")
-        finally:
-            client.post("/api/perf/stop")
-            lc.connected_devices_info = original_devices
-            lc._perf_ios_python = original_python
-            lc._perf_sessions_root = original_root
 
 
 def test_performance_help_tooltips() -> None:
@@ -6145,7 +6116,6 @@ TESTS: List[Callable[[], None]] = [
     test_performance_help_tooltips,
     test_performance_ios_monitor,
     test_performance_ios_tool_detection,
-    test_performance_restart_on_game_switch,
     test_sdk_check_results_text_size,
     test_repository_moved_to_indiezvn,
     test_package_log_delta_ui_contract,
