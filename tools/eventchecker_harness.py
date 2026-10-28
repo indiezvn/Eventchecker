@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 86
+RELEASE_SOURCE_BUILD = 87
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2635,6 +2635,61 @@ def test_log_detail_joins_split_json() -> None:
                    "function expandNestedJson(value, depth = 0) {", "const parsed = expandNestedJson(JSON.parse(jsonStr));",
                    "const IOS_SYSLOG_HEADER_PATTERN = /", "LOGCAT_HEADER_PATTERN.exec(text || '') || IOS_SYSLOG_HEADER_PATTERN.exec(text || '')"):
         _assert(needle in html, f"split-log JSON join is missing {needle}")
+
+def test_performance_ios_tool_detection() -> None:
+    """The app finds a Python with pymobiledevice3 >= 9.30, or says per platform what to install."""
+    original_run, original_candidates = lc.subprocess.run, lc._perf_python_candidates
+    results = {}
+
+    def fake_run(command, **kwargs):
+        code = command[-1]
+        key = (command[0], "probe" if "userspace_tunnel" in code else "python")
+        out, err, rc = results.get(key, ("", "not found", 1))
+        return types.SimpleNamespace(stdout=out, stderr=err, returncode=rc)
+
+    try:
+        lc.subprocess.run = fake_run
+        lc._perf_python_candidates = lambda: [["/old/python3"], ["/good/python3"]]
+        results.update({
+            ("/old/python3", "probe"): ("", "ModuleNotFoundError: No module named 'pymobiledevice3.remote.userspace_tunnel'", 1),
+            ("/old/python3", "python"): ("/old/python3\n3.11\n", "", 0),
+            ("/good/python3", "probe"): ("/good/python3\n11.45.0\n", "", 0),
+        })
+        status = lc._perf_detect_ios_tool()
+        _assert_equal((status["installed"], status["python"], status["version"]), (True, "/good/python3", "11.45.0"),
+                      "the first interpreter that imports the userspace tunnel wins")
+        results.pop(("/good/python3", "probe"))
+        status = lc._perf_detect_ios_tool()
+        _assert_equal((status["installed"], status["outdated"], status["python_found"]), (False, True, "/old/python3"),
+                      "an old pymobiledevice3 is reported as outdated")
+        _assert_equal(status["install_command"], "/old/python3 -m pip install --user -U pymobiledevice3", "install with that Python")
+        results.clear()
+        results[("/good/python3", "python")] = ("/good/python3\n3.8\n", "", 0)
+        status = lc._perf_detect_ios_tool()
+        _assert_equal((status["installed"], status["python_found"], status["install_command"]), (False, "", ""),
+                      "no Python 3.9+: the page asks to install Python first")
+    finally:
+        lc.subprocess.run, lc._perf_python_candidates = original_run, original_candidates
+    _assert_equal(lc._perf_install_command("/opt/homebrew/bin/python3"),
+                  "/opt/homebrew/bin/python3 -m pip install --user -U --break-system-packages pymobiledevice3",
+                  "Homebrew Python needs --break-system-packages for a user install")
+    _assert_equal(lc._perf_install_command("C:/Program Files/Python312/python.exe"),
+                  '"C:/Program Files/Python312/python.exe" -m pip install --user -U pymobiledevice3', "paths with spaces are quoted")
+    original_status = lc._perf_ios_tool_status
+    try:
+        lc._perf_ios_tool_status = lambda refresh=False, wait=True: {"installed": False, "python": "", "version": "", "outdated": False,
+                                                                    "python_found": "", "python_version": "", "install_command": "",
+                                                                    "platform": "windows"}
+        _assert_equal(lc._perf_ios_python(), "", "no interpreter while pymobiledevice3 is missing")
+        data = lc.app.test_client().get("/api/perf/ios-tool").get_json()
+        _assert(data["ok"] and data["installed"] is False and data["platform"] == "windows", "status API reports the check")
+    finally:
+        lc._perf_ios_tool_status = original_status
+    html = lc.app.test_client().get("/").get_data(as_text=True)
+    for needle in ('id="perfIosToolBanner"', 'id="perfIosToolToast"', 'id="perfIosToolCommands"', "async function perfCheckIosTool(refresh = false)",
+                   "{ name: 'macOS', current: !win,", "{ name: 'Windows', current: win,", "py -m pip install --user -U pymobiledevice3",
+                   "if (status?.platform === 'ios') perfCheckIosTool();", "&& !inPerformance && onIos));"):
+        _assert(needle in html, f"pymobiledevice3 notice is missing {needle}")
 
 
 def test_performance_help_tooltips() -> None:
@@ -6060,6 +6115,7 @@ TESTS: List[Callable[[], None]] = [
     test_log_detail_joins_split_json,
     test_performance_help_tooltips,
     test_performance_ios_monitor,
+    test_performance_ios_tool_detection,
     test_sdk_check_results_text_size,
     test_repository_moved_to_indiezvn,
     test_package_log_delta_ui_contract,
