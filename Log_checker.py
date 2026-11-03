@@ -1463,7 +1463,6 @@ PRICE_ROTATION_PREFIXES = (
     ("Banner", "[Ad,Banner"),
     ("MREC", "[Ad,MREC"),
 )
-_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 PRICE_ROTATION_HIDDEN_TYPES = frozenset({"ascendx", "cloudx"})
 PRICE_ROTATION_TYPE_ALIASES = {
     "max": "max",
@@ -3645,12 +3644,9 @@ def _parse_price_rotation_log(log_entry, device_id):
     if not raw_log:
         return None
 
-    # Games write the marker in mixed case ("[Ad,Mrec", "[Ad,MREC"), so match it case-insensitively.
-    # ASCII-only lowering keeps every index aligned with raw_log.
-    search_log = raw_log.translate(_ASCII_LOWER)
     marker_candidates = []
     for bidding_name, marker_prefix in PRICE_ROTATION_PREFIXES:
-        marker_start = search_log.find(marker_prefix.lower())
+        marker_start = raw_log.find(marker_prefix)
         if marker_start == -1:
             continue
         type_start = marker_start + len(marker_prefix)
@@ -3670,7 +3666,7 @@ def _parse_price_rotation_log(log_entry, device_id):
     if not rotation_type:
         service_text = raw_log[marker_end + 1:].lstrip()
         cap_service = f"{bidding_name}CapService"
-        rotation_type = f"{bidding_name}Cap" if service_text.lower().startswith(cap_service.lower()) else marker_prefix[len("[Ad,"):]
+        rotation_type = f"{bidding_name}Cap" if service_text.startswith(cap_service) else marker_prefix[len("[Ad,"):]
     payload_text = raw_log[marker_end + 1:].strip()
     json_text = extract_json_object_from_text(payload_text)
     parsed_json = None
@@ -4747,7 +4743,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(92)</title>
+    <title>Event Inspector v2.5.0(93)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4948,7 +4944,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(92)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(93)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -7832,10 +7828,7 @@ HTML_TEMPLATE = """
                     return aliases.has(rotationType);
                 })) return false;
                 const rawLog = (res.raw_log || '').toLowerCase();
-                // Ad type comes from the row's own [Ad,<Type> marker, not from words in the payload
-                // (a Banner log lists "mrec"/"rewarded" placement ids too).
-                const adType = String(res.bidding_name || '').toLowerCase();
-                if (selectedAdTypeFilters.length > 0 && !selectedAdTypeFilters.includes(adType)) return false;
+                if (selectedAdTypeFilters.length > 0 && !selectedAdTypeFilters.some(value => rawLog.includes(value))) return false;
                 if (textFilter && !rawLog.includes(textFilter)) return false;
                 return true;
                 };
