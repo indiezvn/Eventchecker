@@ -754,6 +754,18 @@ HTML_TEMPLATE = """
     <title>Android App Tools</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+        // Event Inspector theme: ?theme=dark when the frame opens, then a
+        // postMessage from the parent window each time the user switches.
+        (function () {
+            const root = document.documentElement;
+            root.classList.toggle('dark', new URLSearchParams(location.search).get('theme') === 'dark');
+            window.addEventListener('message', (event) => {
+                if (event.source !== window.parent || !event.data || event.data.type !== 'eventinspector-theme') return;
+                root.classList.toggle('dark', event.data.dark === true);
+            });
+        })();
+    </script>
     <style>
         body { font-family: 'Inter', sans-serif; }
         .container h2.text-xl { font-size: 1.1rem !important; line-height: 1.35; }
@@ -805,6 +817,34 @@ HTML_TEMPLATE = """
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         .keystore-info-hardcoded { background-color: #eef2ff; border: 1px solid #c7d2fe; padding: 0.75rem; border-radius: 0.375rem; margin-bottom: 1rem; font-size: 0.9em; color: #4338ca; }
+
+        /* Dark mode (same palette as the Event Inspector window around this frame). */
+        html.dark { color-scheme: dark; }
+        html.dark body, html.dark .bg-gray-100 { background-color: #111318; color: #cdd2d9; }
+        html.dark .card, html.dark .bg-white { background-color: #1a1d23; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5); }
+        html.dark .text-gray-700 { color: #cdd2d9; }
+        html.dark .text-gray-600 { color: #aab1bb; }
+        html.dark .text-gray-500 { color: #8b929d; }
+        html.dark .border-gray-300 { border-color: #3e4551; }
+        html.dark .file-input, html.dark .text-input, html.dark .textarea, html.dark select { background-color: #20242b; color: #e6e8eb; border-color: #3e4551; }
+        html.dark ::placeholder { color: #6f7680; }
+        html.dark .button-secondary { background-color: #4b5563; }
+        html.dark .button-secondary:hover { background-color: #6b7280; }
+        html.dark .tab-button { background-color: #272c34; color: #aab1bb; border-color: #3e4551; }
+        html.dark .tab-button.active { background-color: #1a1d23; color: #60a5fa; border-bottom-color: #1a1d23; }
+        html.dark .results-section h3, html.dark .results-section h4 { color: #e6e8eb; border-bottom-color: #2f3540; }
+        html.dark .results-section p, html.dark .results-section li { color: #cdd2d9; }
+        html.dark .results-section .code { background-color: #272c34; color: #e6e8eb; }
+        html.dark .comparison-item { border-bottom-color: #2f3540; }
+        html.dark .error-message { color: #fca5a5; background-color: rgba(239, 68, 68, 0.12); border-color: rgba(248, 113, 113, 0.4); }
+        html.dark .info-message { color: #6ee7b7; background-color: rgba(16, 185, 129, 0.12); border-color: rgba(52, 211, 153, 0.4); }
+        html.dark .warning-message { color: #fcd34d; background-color: rgba(245, 158, 11, 0.12); border-color: rgba(251, 191, 36, 0.4); }
+        html.dark .status-passed { color: #4ade80; }
+        html.dark .status-failed { color: #f87171; }
+        html.dark .status-strange { color: #fbbf24; }
+        html.dark .status-info { color: #8b929d; }
+        html.dark .spinner { border-color: rgba(255, 255, 255, 0.12); border-left-color: #60a5fa; }
+        html.dark .keystore-info-hardcoded { background-color: rgba(99, 102, 241, 0.12); border-color: rgba(129, 140, 248, 0.35); color: #a5b4fc; }
     </style>
 </head>
 <body class="bg-gray-100">

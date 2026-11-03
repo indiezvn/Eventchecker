@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 90
+RELEASE_SOURCE_BUILD = 91
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2351,7 +2351,8 @@ def test_indiez_logo_footer() -> None:
     """The INDIEZ logo sits in the footer, embedded as a PNG data URI so the update payload carries it."""
     _assert(lc.INDIEZ_LOGO_DATA_URI.startswith("data:image/png;base64,iVBORw0KGgo"), "footer logo must be an embedded PNG")
     html = lc.app.test_client().get("/").get_data(as_text=True)
-    _assert('<div id="appFooter" class="flex-shrink-0 flex items-center justify-center pt-2">' in html, "footer missing")
+    _assert('<div id="appFooter" class="relative flex-shrink-0 flex items-center justify-center pt-2">' in html, "footer missing")
+    _assert('id="toggleThemeBtn" type="button" role="switch"' in html, "the Dark mode switch must sit in the footer")
     _assert(f'<img src="{lc.INDIEZ_LOGO_DATA_URI}" alt="INDIEZ"' in html, "footer must render the INDIEZ logo")
 
 
@@ -2886,15 +2887,27 @@ def test_ui_zoom_setting_contract() -> None:
             _assert('<div id="appHeader" class="bg-white rounded-xl shadow-md p-4 mb-4 flex-shrink-0">' in html, "header must be visible by default")
             _assert('>Hide Top</button>' in html and "function applyTopHidden(hidden)" in html, "Hide Top toggle is missing")
             # Hide Top alone must not pin the zoom: a later default must still apply.
-            _assert_equal(client.post("/api/ui-settings", json={"hide_top": True}).get_json(), {"ok": True, "zoom": 0.85, "hide_top": True}, "hide_top was not saved")
+            _assert_equal(client.post("/api/ui-settings", json={"hide_top": True}).get_json(), {"ok": True, "zoom": 0.85, "hide_top": True, "theme": "light"}, "hide_top was not saved")
             with open(settings_path, encoding="utf-8") as handle:
                 _assert_equal(json.load(handle), {"hide_top": True}, "only the values the user changed may be stored")
-            _assert_equal(client.post("/api/ui-settings", json={"zoom": 1.1}).get_json(), {"ok": True, "zoom": 1.1, "hide_top": True}, "zoom must save without resetting hide_top")
+            _assert_equal(client.post("/api/ui-settings", json={"zoom": 1.1}).get_json(), {"ok": True, "zoom": 1.1, "hide_top": True, "theme": "light"}, "zoom must save without resetting hide_top")
             _assert_equal(client.post("/api/ui-settings", json={"hide_top": "yes"}).status_code, 400, "non-boolean hide_top must be refused")
             _assert_equal(client.post("/api/ui-settings", json={}).status_code, 400, "an empty settings update must be refused")
+            # Dark mode: light by default, saved server-side, rendered as <html class="dark">.
+            _assert('role="switch" aria-checked="false"' in html and "function applyUiTheme(dark)" in html and 'style="font-size: 13.6px;">' in html, "light theme must be the default")
+            for needle in ("html.dark .bg-white", "html.dark .indiez-logo", "--perf-chart-grid", "inkOf('--perf-chart-axis'",
+                           "&theme=${theme}", "postMessage({ type: 'eventinspector-theme', dark }"):
+                _assert(needle in html, f"dark mode contract missing: {needle}")
+            _assert('.hover\\\\:' not in html and '.hover\\:bg-gray-50:hover' in html, "dark hover selectors must reach the page with one escaping backslash")
+            services_text = (ROOT / "services_checker" / "app.py").read_text(encoding="utf-8")
+            for needle in ("get('theme') === 'dark'", "event.source !== window.parent", "event.data.type !== 'eventinspector-theme'", "html.dark .card"):
+                _assert(needle in services_text, f"Services Checker dark mode contract missing: {needle}")
+            _assert_equal(client.post("/api/ui-settings", json={"theme": "blue"}).status_code, 400, "unknown theme must be refused")
+            _assert_equal(client.post("/api/ui-settings", json={"theme": "dark"}).get_json(), {"ok": True, "zoom": 1.1, "hide_top": True, "theme": "dark"}, "theme was not saved")
             html = client.get("/").get_data(as_text=True)
             _assert('data-ui-zoom="1.1" style="font-size: 17.6px;"' in html, "saved zoom is not rendered into the page")
             _assert('flex-shrink-0 hidden">' in html and '>Show Top</button>' in html, "saved hide_top is not rendered into the page")
+            _assert('style="font-size: 17.6px;" class="dark">' in html and 'role="switch" aria-checked="true"' in html, "saved dark theme is not rendered into the page")
             with open(settings_path, "w", encoding="utf-8") as handle:
                 handle.write("{broken")
             html = client.get("/").get_data(as_text=True)
