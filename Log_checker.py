@@ -4738,12 +4738,12 @@ def _levenshtein_distance_limit(a, b, limit=2):
 # --- GIAO DIỆN WEB (HTML/JS) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="vi" data-ui-zoom="{{ ui_zoom }}" style="font-size: {{ ui_zoom_px }}px;"{% if ui_dark %} class="dark"{% endif %}>
+<html lang="vi" data-ui-zoom="{{ ui_zoom }}" style="font-size: {{ ui_zoom_px }}px;">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(91)</title>
+    <title>Event Inspector v2.5.0(92)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4844,94 +4844,6 @@ HTML_TEMPLATE = """
         #tabScrollArea { display: flex; flex-direction: column; }
         #tabScrollArea > [id^="tabContent"]:not(.hidden) { flex: 1 0 auto; display: flex; flex-direction: column; }
         #tabScrollArea > [id^="tabContent"]:not(.hidden) > div:last-child { flex: 1 0 auto; }
-        /* Dark mode: <html class="dark"> (Dark Mode button, saved in ui_settings.json).
-           The markup uses fixed Tailwind colors, so the dark look overrides those
-           utilities here; solid buttons (indigo/blue/amber/red...) keep their color. */
-        .theme-switch { height: 2.5rem; padding: 0 0.25rem; cursor: pointer; }
-        .theme-switch-track { position: relative; width: 2.25rem; height: 1.25rem; border-radius: 9999px; background: #cbd5e1; transition: background-color 0.15s; }
-        .theme-switch-thumb { position: absolute; top: 2px; left: 2px; width: calc(1.25rem - 4px); height: calc(1.25rem - 4px); border-radius: 9999px; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.3); transition: transform 0.15s; }
-        .theme-switch[aria-checked="true"] .theme-switch-track { background: #4f46e5; }
-        .theme-switch[aria-checked="true"] .theme-switch-thumb { transform: translateX(1rem); }
-        .theme-switch-state { min-width: 1.75rem; text-align: left; }
-        .theme-switch:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; border-radius: 0.375rem; }
-        :root {
-            --perf-chart-axis: #cbd5e1; --perf-chart-grid: #eef0f3; --perf-chart-muted: #6b7280;
-            --perf-chart-label: #374151; --perf-chart-surface: #ffffff;
-        }
-        html.dark {
-            color-scheme: dark;
-            --dk-page: #111318; --dk-surface: #1a1d23; --dk-surface-2: #20242b; --dk-surface-3: #272c34; --dk-surface-4: #313742;
-            --dk-line: #2f3540; --dk-line-strong: #3e4551;
-            --dk-text-strong: #e6e8eb; --dk-text: #cdd2d9; --dk-text-2: #aab1bb; --dk-text-3: #8b929d; --dk-text-4: #6f7680; --dk-text-5: #535a64;
-            --perf-chart-axis: #3e4551; --perf-chart-grid: #262b33; --perf-chart-muted: #8b929d;
-            --perf-chart-label: #cdd2d9; --perf-chart-surface: #1a1d23;
-        }
-        html.dark body { background-color: var(--dk-page) !important; color: var(--dk-text); }
-        html.dark .bg-white { background-color: var(--dk-surface); }
-        html.dark .bg-gray-50, html.dark .bg-slate-50 { background-color: var(--dk-surface-2); }
-        html.dark .bg-gray-100, html.dark .bg-slate-100 { background-color: var(--dk-surface-3); }
-        html.dark .bg-gray-200, html.dark .bg-slate-200 { background-color: var(--dk-surface-4); }
-        html.dark .hover\\:bg-gray-50:hover, html.dark .hover\\:bg-slate-100:hover, html.dark .hover\\:bg-gray-100:hover { background-color: var(--dk-surface-3); }
-        html.dark .hover\\:bg-gray-200:hover, html.dark .hover\\:bg-slate-200:hover { background-color: var(--dk-surface-4); }
-        html.dark .hover\\:bg-gray-300:hover, html.dark .hover\\:bg-slate-300:hover { background-color: var(--dk-line-strong); }
-        html.dark .text-gray-900, html.dark .text-gray-800, html.dark .text-slate-800, html.dark .hover\\:text-gray-800:hover { color: var(--dk-text-strong); }
-        html.dark .text-gray-700, html.dark .text-slate-700 { color: var(--dk-text); }
-        html.dark .text-gray-600, html.dark .text-slate-600 { color: var(--dk-text-2); }
-        html.dark .text-gray-500, html.dark .text-slate-500 { color: var(--dk-text-3); }
-        html.dark .text-gray-400 { color: var(--dk-text-4); }
-        html.dark .text-gray-300 { color: var(--dk-text-5); }
-        /* Plain borders take the theme line; colored border utilities below still win. */
-        :where(html.dark) :is(.border, .border-t, .border-b, .border-l, .border-r, .border-x, .border-y, .border-2, .divide-y > *, .divide-x > *, th, td) { border-color: var(--dk-line); }
-        html.dark .border-gray-200, html.dark .border-slate-200 { border-color: var(--dk-line); }
-        /* Same selector shape as Tailwind's divide utilities, so the dark line wins. */
-        html.dark :is(.divide-y, .divide-x, .divide-gray-200) > :not([hidden]) ~ :not([hidden]) { border-color: var(--dk-line); }
-        html.dark .border-gray-300, html.dark .border-slate-300 { border-color: var(--dk-line-strong); }
-        html.dark .shadow-md, html.dark .shadow-sm, html.dark .shadow-xl { --tw-shadow-color: rgba(0, 0, 0, 0.5); }
-        /* Tinted badges and panels */
-        html.dark .bg-indigo-50 { background-color: rgba(99, 102, 241, 0.12); }
-        html.dark .bg-indigo-100, html.dark .hover\\:bg-indigo-50:hover { background-color: rgba(99, 102, 241, 0.22); }
-        html.dark .hover\\:bg-indigo-100:hover, html.dark .hover\\:bg-indigo-200:hover { background-color: rgba(99, 102, 241, 0.32); }
-        html.dark .bg-red-50 { background-color: rgba(239, 68, 68, 0.12); }
-        html.dark .hover\\:bg-red-50:hover, html.dark .hover\\:bg-red-100:hover { background-color: rgba(239, 68, 68, 0.22); }
-        html.dark .bg-amber-50 { background-color: rgba(245, 158, 11, 0.12); }
-        html.dark .hover\\:bg-amber-100:hover { background-color: rgba(245, 158, 11, 0.22); }
-        html.dark .border-indigo-100, html.dark .border-indigo-200 { border-color: rgba(129, 140, 248, 0.35); }
-        html.dark .hover\\:border-indigo-300:hover { border-color: rgba(129, 140, 248, 0.6); }
-        html.dark .border-red-200, html.dark .border-red-300 { border-color: rgba(248, 113, 113, 0.4); }
-        html.dark .border-amber-200, html.dark .border-amber-300, html.dark .border-amber-400 { border-color: rgba(251, 191, 36, 0.4); }
-        /* Colored text, lifted for contrast on the dark surface */
-        html.dark .text-indigo-600, html.dark .text-indigo-700 { color: #a5b4fc; }
-        html.dark .text-indigo-900, html.dark .hover\\:text-indigo-800:hover { color: #c7d2fe; }
-        html.dark .text-red-500, html.dark .text-red-600, html.dark .text-red-700 { color: #f87171; }
-        html.dark .text-green-600, html.dark .text-green-700 { color: #4ade80; }
-        html.dark .text-emerald-700 { color: #34d399; }
-        html.dark .text-orange-500, html.dark .text-orange-600 { color: #fb923c; }
-        html.dark .text-amber-500, html.dark .text-amber-600, html.dark .text-amber-700 { color: #fbbf24; }
-        html.dark .text-amber-800, html.dark .text-amber-900 { color: #fcd34d; }
-        html.dark .text-purple-700 { color: #c084fc; }
-        html.dark .text-blue-600 { color: #60a5fa; }
-        html.dark .text-cyan-600 { color: #22d3ee; }
-        /* Form fields without their own background */
-        html.dark :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea) { background-color: var(--dk-surface-2); color: var(--dk-text-strong); border-color: var(--dk-line-strong); }
-        html.dark ::placeholder { color: var(--dk-text-4); }
-        /* Custom stylesheet colors above */
-        html.dark .log-cell { color: var(--dk-text-3); }
-        html.dark #packageLogTableBody tr.package-log-row td { border-bottom-color: var(--dk-surface-3); }
-        html.dark #packageLogTableBody tr.selected, html.dark #packageHistoryTableBody tr.selected { background-color: rgba(59, 130, 246, 0.35) !important; }
-        html.dark .log-row.selected { background-color: rgba(59, 130, 246, 0.25); }
-        html.dark .tab-btn.active { border-color: #818cf8; color: #a5b4fc; background-color: rgba(99, 102, 241, 0.16); }
-        html.dark .adrevenue-panel, html.dark .perf-tile { border-color: var(--dk-line); background: var(--dk-surface-2); }
-        html.dark .perf-tile-label { color: var(--dk-text-3); }
-        html.dark .perf-tile-value { color: var(--dk-text-strong); }
-        html.dark .perf-help-btn { border-color: var(--dk-line-strong); background: var(--dk-surface); color: var(--dk-text-3); }
-        html.dark .perf-help-btn:hover, html.dark .perf-help-btn[aria-expanded="true"] { border-color: #818cf8; color: #a5b4fc; background: rgba(99, 102, 241, 0.16); }
-        html.dark #perfHelpPop, html.dark .perf-tooltip { background: var(--dk-surface-2); border-color: var(--dk-line-strong); color: var(--dk-text); }
-        html.dark #perfHelpPop .perf-help-title { color: var(--dk-text-strong); }
-        html.dark pre::-webkit-scrollbar-thumb { background: var(--dk-line-strong); }
-        html.dark pre::-webkit-scrollbar-track { background: var(--dk-surface-2); }
-        /* Black wordmark: flip its lightness so it reads on the dark page, hues kept. */
-        html.dark .indiez-logo { filter: invert(1) hue-rotate(180deg); }
-        html.dark .theme-switch[aria-checked="true"] .theme-switch-track { background: #6366f1; }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800 h-screen overflow-hidden">
@@ -4944,7 +4856,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(91)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(92)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5656,13 +5568,8 @@ HTML_TEMPLATE = """
 
         </div>
         <!-- FOOTER -->
-        <div id="appFooter" class="relative flex-shrink-0 flex items-center justify-center pt-2">
-            <img src="{{ indiez_logo }}" alt="INDIEZ" class="indiez-logo h-10 w-auto select-none" draggable="false">
-            <button id="toggleThemeBtn" type="button" role="switch" aria-checked="{{ 'true' if ui_dark else 'false' }}" class="theme-switch absolute right-0 bottom-0 flex items-center gap-2 text-xs font-semibold text-slate-700" title="Switch between light and dark mode">
-                <span>Dark mode</span>
-                <span class="theme-switch-track"><span class="theme-switch-thumb"></span></span>
-                <span class="theme-switch-state">{{ 'ON' if ui_dark else 'OFF' }}</span>
-            </button>
+        <div id="appFooter" class="flex-shrink-0 flex items-center justify-center pt-2">
+            <img src="{{ indiez_logo }}" alt="INDIEZ" class="h-10 w-auto select-none" draggable="false">
         </div>
     </div>
     
@@ -5956,33 +5863,6 @@ HTML_TEMPLATE = """
         }
         document.getElementById('toggleTopBtn')?.addEventListener('click', () => {
             applyTopHidden(!document.getElementById('appHeader')?.classList.contains('hidden'));
-        });
-
-        // Dark Mode / Light Mode: a class on <html> switches the dark overrides
-        // in the stylesheet; saved on the server like the zoom level.
-        function applyUiTheme(dark) {
-            document.documentElement.classList.toggle('dark', dark);
-            const btn = document.getElementById('toggleThemeBtn');
-            if (btn) {
-                btn.setAttribute('aria-checked', dark ? 'true' : 'false');
-                btn.querySelector('.theme-switch-state').textContent = dark ? 'ON' : 'OFF';
-            }
-            if (typeof perfRender === 'function') perfRender();
-            // Services Checker runs on its own port: tell its frame to switch too.
-            const servicesFrame = document.getElementById('servicesCheckerFrame');
-            if (servicesFrame?.contentWindow && servicesFrame.src) {
-                try {
-                    servicesFrame.contentWindow.postMessage({ type: 'eventinspector-theme', dark }, new URL(servicesFrame.src).origin);
-                } catch (_) {}
-            }
-            fetch('/api/ui-settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ theme: dark ? 'dark' : 'light' }),
-            }).catch(() => {});
-        }
-        document.getElementById('toggleThemeBtn')?.addEventListener('click', () => {
-            applyUiTheme(!document.documentElement.classList.contains('dark'));
         });
 
         // --- Package Log quick filters ---
@@ -6550,8 +6430,7 @@ HTML_TEMPLATE = """
         function showServicesCheckerFrame(url) {
             const frame = document.getElementById('servicesCheckerFrame');
             if (!frame) return;
-            const theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
-            frame.src = `${url}/?eventinspector=${Date.now()}&theme=${theme}`;
+            frame.src = `${url}/?eventinspector=${Date.now()}`;
             frame.dataset.started = 'true';
             frame.classList.remove('hidden');
         }
@@ -10146,19 +10025,13 @@ HTML_TEMPLATE = """
             const tMax = Math.max(points.length ? points[points.length - 1].t : 0, 60);
             const x = t => pad.left + (t / tMax) * plotW;
             const y = v => pad.top + plotH - (v / yMax) * plotH;
-            // Axis/grid ink follows the theme (--perf-chart-* in the stylesheet).
-            const ink = getComputedStyle(document.documentElement);
-            const inkOf = (name, fallback) => ink.getPropertyValue(name).trim() || fallback;
-            const axisInk = inkOf('--perf-chart-axis', '#cbd5e1'), gridInk = inkOf('--perf-chart-grid', '#eef0f3');
-            const mutedInk = inkOf('--perf-chart-muted', '#6b7280'), labelInk = inkOf('--perf-chart-label', '#374151');
-            const surfaceInk = inkOf('--perf-chart-surface', '#ffffff');
             ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
             ctx.lineWidth = 1;
             for (let i = 0; i <= 4; i++) {
                 const v = (yMax / 4) * i, yy = Math.round(y(v)) + 0.5;
-                ctx.strokeStyle = i === 0 ? axisInk : gridInk;
+                ctx.strokeStyle = i === 0 ? '#cbd5e1' : '#eef0f3';
                 ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(pad.left + plotW, yy); ctx.stroke();
-                ctx.fillStyle = mutedInk; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+                ctx.fillStyle = '#6b7280'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
                 ctx.fillText(String(Math.round(v)), pad.left - 6, yy);
             }
             ctx.textAlign = 'center'; ctx.textBaseline = 'top';
@@ -10196,7 +10069,7 @@ HTML_TEMPLATE = """
                 ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
                 labels.forEach(l => {
                     ctx.fillStyle = l.s.color; ctx.fillRect(pad.left + plotW + 6, l.yy - 4, 8, 8);
-                    ctx.fillStyle = labelInk; ctx.fillText(`${l.s.label} ${Math.round(l.v)}`, pad.left + plotW + 18, l.yy);
+                    ctx.fillStyle = '#374151'; ctx.fillText(`${l.s.label} ${Math.round(l.v)}`, pad.left + plotW + 18, l.yy);
                 });
             }
             (opts.captures || []).forEach(c => {
@@ -10207,13 +10080,13 @@ HTML_TEMPLATE = """
             const hover = perf.hover[canvas.id];
             if (hover !== undefined && points[hover]) {
                 const p = points[hover], xx = Math.round(x(p.t)) + 0.5;
-                ctx.lineWidth = 1; ctx.strokeStyle = mutedInk;
+                ctx.lineWidth = 1; ctx.strokeStyle = '#9ca3af';
                 ctx.beginPath(); ctx.moveTo(xx, pad.top); ctx.lineTo(xx, pad.top + plotH); ctx.stroke();
                 series.forEach(s => {
                     const v = p[s.key];
                     if (v === undefined || v === null) return;
                     ctx.beginPath(); ctx.arc(xx, y(v), 4, 0, Math.PI * 2);
-                    ctx.fillStyle = s.color; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = surfaceInk; ctx.stroke();
+                    ctx.fillStyle = s.color; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#ffffff'; ctx.stroke();
                 });
             }
             canvas._perfGeom = { padLeft: pad.left, plotW, tMax };
@@ -10790,7 +10663,6 @@ UI_SETTINGS_FILENAME = "ui_settings.json"
 UI_ZOOM_LEVELS = (0.7, 0.75, 0.8, 0.85, 0.9, 1.0, 1.1, 1.25, 1.4)
 # Default text size for users who never picked one (A-/A+ still go 70-140%).
 UI_DEFAULT_ZOOM = 0.85
-UI_THEMES = ("light", "dark")
 
 
 def _ui_settings_path():
@@ -10812,8 +10684,6 @@ def _read_stored_ui_settings():
                 pass
             if isinstance(raw.get("hide_top"), bool):
                 stored["hide_top"] = raw["hide_top"]
-            if raw.get("theme") in UI_THEMES:
-                stored["theme"] = raw["theme"]
     except (OSError, ValueError):
         pass
     return stored
@@ -10821,13 +10691,13 @@ def _read_stored_ui_settings():
 
 def _load_ui_settings():
     """Per-machine UI preferences (the desktop webview drops localStorage)."""
-    return {"zoom": UI_DEFAULT_ZOOM, "hide_top": False, "theme": "light", **_read_stored_ui_settings()}
+    return {"zoom": UI_DEFAULT_ZOOM, "hide_top": False, **_read_stored_ui_settings()}
 
 
 @app.post('/api/ui-settings')
 def ui_settings_api():
     payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or not ({"zoom", "hide_top", "theme"} & payload.keys()):
+    if not isinstance(payload, dict) or not ({"zoom", "hide_top"} & payload.keys()):
         return jsonify({"ok": False, "error": "invalid_settings"}), 400
     stored = _read_stored_ui_settings()
     if "zoom" in payload:
@@ -10842,10 +10712,6 @@ def ui_settings_api():
         if not isinstance(payload["hide_top"], bool):
             return jsonify({"ok": False, "error": "invalid_hide_top"}), 400
         stored["hide_top"] = payload["hide_top"]
-    if "theme" in payload:
-        if payload["theme"] not in UI_THEMES:
-            return jsonify({"ok": False, "error": "invalid_theme"}), 400
-        stored["theme"] = payload["theme"]
     # Write only what the user changed, so a later default (e.g. a new
     # default zoom) still reaches users who never picked a zoom level.
     path = _ui_settings_path()
@@ -12486,7 +12352,6 @@ def index():
         HTML_TEMPLATE,
         ui_zoom=ui_zoom,
         ui_hide_top=ui_settings["hide_top"],
-        ui_dark=ui_settings["theme"] == "dark",
         indiez_logo=INDIEZ_LOGO_DATA_URI,
         package_quick_filters={p: _load_package_quick_filters(p)[0] for p in PACKAGE_QUICK_FILTER_PLATFORMS},
         package_quick_filter_defaults={p: _default_package_quick_filters(p) for p in PACKAGE_QUICK_FILTER_PLATFORMS},
