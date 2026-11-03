@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 90
+RELEASE_SOURCE_BUILD = 91
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -4283,22 +4283,6 @@ def test_package_quick_filter_history_query() -> None:
                 os.environ["EVENTINSPECTOR_DATA_DIR"] = original_data_dir
 
 
-def test_package_log_row_copy_contract() -> None:
-    """Package Log / Recorded Log: Ctrl/Cmd+click picks rows, Ctrl+C copies them, popup text copies natively."""
-    source_text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
-    _assert_equal(source_text.count("if (isRowToggleClick(e)) {"), 2, "Ctrl/Cmd+click must toggle rows in both the live and Recorded Log tables")
-    for needle in (
-        "toggleSelectedLogRow(row, selectedPackageRowKeys);",
-        "toggleSelectedLogRow(row, selectedPackageHistoryRowKeys);",
-        "return (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;",
-        "if (logDetailModal && !logDetailModal.classList.contains('hidden')) return;",
-        "if (textSelection && !textSelection.isCollapsed && String(textSelection).trim()) return;",
-        "if (!(await copyTextToClipboard(lines.join('\\\\n')))) console.error('Copy failed');",
-    ):
-        _assert(needle in source_text, f"row copy contract missing: {needle}")
-    _assert("await navigator.clipboard.writeText(textToCopy);" not in source_text, "Ctrl+C rows must use copyTextToClipboard (desktop fallbacks)")
-
-
 def test_price_rotation_exact_parser() -> None:
     source_text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
     _assert('onclick="switchTab(\'PriceRotation\')">Bidding</button>' in source_text, "Price Rotation tab label must be Bidding")
@@ -4340,24 +4324,6 @@ def test_price_rotation_exact_parser() -> None:
     _assert_equal(interstitial_plain["type"], "InterstitialBidding", "A plain marker must use the InterstitialBidding type")
     _assert(lc._parse_price_rotation_log(valid.replace("[Ad,RewardedBidding,", "[Ad,RewardedBiddingX,"), "device-price") is None, "Price Rotation marker must be exact")
     _assert(lc._parse_price_rotation_log(interstitial_raw.replace("[Ad,InterstitialBidding,", "[Ad,InterstitialBiddingX,"), "device-price") is None, "Interstitial marker must be exact")
-    # The same markers without "Bidding" ([Ad,Rewarded...] / [Ad,Interstitial...]) are read the same way.
-    for name in ("Banner", "MREC"):
-        _assert(source_text.count(f'id="priceRotationAdType{name}"') == 1, f"{name} ad type filter must exist exactly once")
-        _assert(f'value="{name.lower()}"' in source_text, f"{name} ad type filter value is missing")
-    _assert(lc._parse_price_rotation_log('Unity : [Ad,LevelPlay,Banner] LevelPlayBannerAdWrapper->_OnAdLoaded', "device-price") is None,
-            "LevelPlay banner callbacks are not Bidding logs")
-    # The same markers without "Bidding" ([Ad,Rewarded...] / [Ad,Interstitial...]) and Banner/MREC are read the same way.
-    for marker, name in (("[Ad,Rewarded", "Rewarded"), ("[Ad,Interstitial", "Interstitial"), ("[Ad,Banner", "Banner"), ("[Ad,MREC", "MREC")):
-        typed = lc._parse_price_rotation_log(f'Unity : {marker}, LevelPlay] Raise: {{"act":"bid"}}', "device-price")
-        _assert(typed is not None, f"Price Rotation parser must accept the {name} marker")
-        _assert_equal(typed["bidding_name"], name, f"{name} marker must keep its ad type")
-        _assert_equal(typed["type"], "LevelPlay", f"{name} type should come from the marker")
-        short_cap = lc._parse_price_rotation_log(f'Unity : {marker}] {name}CapService: {{"act":"cap"}}', "device-price")
-        _assert(short_cap is not None and short_cap["type"] == f"{name}Cap", f"{name}CapService must use the {name}Cap type")
-        short_plain = lc._parse_price_rotation_log(f'Unity : {marker}] Raise: {{"act":"bid"}}', "device-price")
-        _assert(short_plain is not None and short_plain["type"] == name, f"A plain {name} marker must use the {name} type")
-        _assert(lc._parse_price_rotation_log(f'Unity : {marker}X, LevelPlay] Raise: {{"act":"bid"}}', "device-price") is None,
-                f"{name} marker must be exact")
 
     original_paused = lc.is_paused
     original_emit = lc.socketio.emit
@@ -6235,7 +6201,6 @@ TESTS: List[Callable[[], None]] = [
     test_package_quick_filter_history_query,
     test_package_quick_filter_upgrade_backup_export_import,
     test_price_rotation_exact_parser,
-    test_package_log_row_copy_contract,
     test_load_ads_provider_contract,
     test_load_ads_max_contract,
     test_ios_load_ads_max_viewability_contract,

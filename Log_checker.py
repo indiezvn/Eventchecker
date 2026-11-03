@@ -1458,10 +1458,6 @@ PRICE_ROTATION_PREFIX = "[Ad,RewardedBidding"
 PRICE_ROTATION_PREFIXES = (
     ("Rewarded", "[Ad,RewardedBidding"),
     ("Interstitial", "[Ad,InterstitialBidding"),
-    ("Rewarded", "[Ad,Rewarded"),
-    ("Interstitial", "[Ad,Interstitial"),
-    ("Banner", "[Ad,Banner"),
-    ("MREC", "[Ad,MREC"),
 )
 PRICE_ROTATION_HIDDEN_TYPES = frozenset({"ascendx", "cloudx"})
 PRICE_ROTATION_TYPE_ALIASES = {
@@ -3639,7 +3635,7 @@ def extract_json_object_from_text(text):
 
 
 def _parse_price_rotation_log(log_entry, device_id):
-    """Parse exact RewardedBidding/InterstitialBidding and Rewarded/Interstitial/Banner/MREC markers."""
+    """Parse exact RewardedBidding and InterstitialBidding markers."""
     raw_log = str(log_entry or "").strip()
     if not raw_log:
         return None
@@ -3666,7 +3662,7 @@ def _parse_price_rotation_log(log_entry, device_id):
     if not rotation_type:
         service_text = raw_log[marker_end + 1:].lstrip()
         cap_service = f"{bidding_name}CapService"
-        rotation_type = f"{bidding_name}Cap" if service_text.startswith(cap_service) else marker_prefix[len("[Ad,"):]
+        rotation_type = f"{bidding_name}Cap" if service_text.startswith(cap_service) else f"{bidding_name}Bidding"
     payload_text = raw_log[marker_end + 1:].strip()
     json_text = extract_json_object_from_text(payload_text)
     parsed_json = None
@@ -4743,7 +4739,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(90)</title>
+    <title>Event Inspector v2.5.0(91)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4856,7 +4852,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(90)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(91)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5357,14 +5353,6 @@ HTML_TEMPLATE = """
                                 <label class="inline-flex items-center whitespace-nowrap">
                                     <input id="priceRotationAdTypeInterstitial" name="priceRotationAdTypeFilter" type="checkbox" value="interstitial" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
                                     <span class="ml-2 text-sm text-gray-900">Interstitial</span>
-                                </label>
-                                <label class="inline-flex items-center whitespace-nowrap">
-                                    <input id="priceRotationAdTypeBanner" name="priceRotationAdTypeFilter" type="checkbox" value="banner" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
-                                    <span class="ml-2 text-sm text-gray-900">Banner</span>
-                                </label>
-                                <label class="inline-flex items-center whitespace-nowrap">
-                                    <input id="priceRotationAdTypeMREC" name="priceRotationAdTypeFilter" type="checkbox" value="mrec" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
-                                    <span class="ml-2 text-sm text-gray-900">MREC</span>
                                 </label>
                             </div>
                         </div>
@@ -9237,32 +9225,6 @@ HTML_TEMPLATE = """
             document.getElementById(id)?.addEventListener('click', () => { clearPackageHistorySelection(); });
         });
 
-        // --- Ctrl/Cmd+click adds or removes one row (Package Log and Recorded Log) ---
-        let lastRowToggleAt = 0;
-        function isRowToggleClick(e) {
-            return (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
-        }
-        function toggleSelectedLogRow(row, keySet) {
-            let key = '';
-            try { key = decodeURIComponent(row.getAttribute('data-row-key') || ''); } catch (err) {}
-            if (!key) return;
-            if (keySet.has(key)) keySet.delete(key);
-            else keySet.add(key);
-            row.classList.toggle('selected', keySet.has(key));
-            lastRowToggleAt = Date.now();
-        }
-        // On macOS Ctrl+click is also a right click: no context menu on a log row,
-        // and toggle here when the webview sent no left mousedown for it.
-        [['packageLogTableBody', 'tr.package-log-row', () => selectedPackageRowKeys],
-         ['packageHistoryTableBody', 'tr.package-history-row', () => selectedPackageHistoryRowKeys]].forEach(([bodyId, rowSelector, keys]) => {
-            document.getElementById(bodyId)?.addEventListener('contextmenu', (e) => {
-                const row = e.target.closest(rowSelector);
-                if (!row || !e.ctrlKey) return;
-                e.preventDefault();
-                if (Date.now() - lastRowToggleAt > 400) toggleSelectedLogRow(row, keys());
-            });
-        });
-
         // --- Row Selection for Package Log (click + drag) ---
         let isSelectingRows = false;
         let dragStartIndex = null;
@@ -9293,14 +9255,8 @@ HTML_TEMPLATE = """
             }
             // Drop a leftover browser text selection (e.g. from a double-click drag).
             window.getSelection()?.removeAllRanges();
-            const idx = parseInt(row.getAttribute('data-row-index') || '0', 10);
-            if (isRowToggleClick(e)) {
-                toggleSelectedLogRow(row, selectedPackageRowKeys);
-                packageSelectionAnchor = idx;
-                e.preventDefault();
-                return;
-            }
             isSelectingRows = true;
+            const idx = parseInt(row.getAttribute('data-row-index') || '0', 10);
             if (e.shiftKey && packageSelectionAnchor !== null) {
                 dragStartIndex = packageSelectionAnchor;
                 updateSelectionRange(packageSelectionAnchor, idx);
@@ -9352,14 +9308,8 @@ HTML_TEMPLATE = """
                 document.activeElement.blur();
             }
             window.getSelection()?.removeAllRanges();
-            const idx = parseInt(row.getAttribute('data-row-index') || '0', 10);
-            if (isRowToggleClick(e)) {
-                toggleSelectedLogRow(row, selectedPackageHistoryRowKeys);
-                historySelectionAnchor = idx;
-                e.preventDefault();
-                return;
-            }
             isSelectingHistoryRows = true;
+            const idx = parseInt(row.getAttribute('data-row-index') || '0', 10);
             if (e.shiftKey && historySelectionAnchor !== null) {
                 historyDragStartIndex = historySelectionAnchor;
                 updateHistorySelectionRange(historySelectionAnchor, idx);
@@ -9439,21 +9389,30 @@ HTML_TEMPLATE = """
         });
 
         // --- Ctrl+C to copy selected package log rows ---
-        // The selected rows are copied straight away, no popup needed.  While the
-        // Log Details popup is open, or any text is highlighted, the normal copy
-        // runs instead, so copying part of the text copies only that part.
         document.addEventListener('keydown', async (e) => {
-            if (!(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLowerCase() !== 'c') return;
+            if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'c') return;
             const active = document.activeElement;
-            if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
-            if (logDetailModal && !logDetailModal.classList.contains('hidden')) return;
-            const textSelection = window.getSelection();
-            if (textSelection && !textSelection.isCollapsed && String(textSelection).trim()) return;
+            if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
             const selectedRows = getActiveSelectedLogRows();
             if (selectedRows.length === 0) return;
-            e.preventDefault();
             const lines = selectedRows.map(r => packageRowCellTexts(r).join('\\t'));
-            if (!(await copyTextToClipboard(lines.join('\\n')))) console.error('Copy failed');
+            const textToCopy = lines.join('\\n');
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(textToCopy);
+                } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = textToCopy;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+            } catch (err) {
+                console.error('Copy failed', err);
+            }
         });
         
         function renderSdkCheckPresetOptions() {
