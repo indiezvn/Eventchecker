@@ -50,7 +50,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 91
+RELEASE_SOURCE_BUILD = 92
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -4371,6 +4371,25 @@ def test_price_rotation_exact_parser() -> None:
         _assert(short_plain is not None and short_plain["type"] == name, f"A plain {name} marker must use the {name} type")
         _assert(lc._parse_price_rotation_log(f'Unity : {marker}X, LevelPlay] Raise: {{"act":"bid"}}', "device-price") is None,
                 f"{name} marker must be exact")
+    # Games write "[Ad,Mrec,MAX]"; the marker is matched case-insensitively.
+    mrec_mixed = lc._parse_price_rotation_log('Unity : [Ad,Mrec,MAX] MaxMrecRoute->_LogCallback: {"act":"bid"}', "device-price")
+    _assert(mrec_mixed is not None and mrec_mixed["bidding_name"] == "MREC" and mrec_mixed["type"] == "MAX",
+            "[Ad,Mrec marker must be read as MREC")
+    mrec_cap = lc._parse_price_rotation_log('Unity : [Ad,Mrec] MrecCapService: {"act":"cap"}', "device-price")
+    _assert(mrec_cap is not None and mrec_cap["type"] == "MRECCap", "MrecCapService must use the MRECCap type")
+    _assert(lc._parse_price_rotation_log('Unity : [Ad,MrecX, MAX] Raise: {"act":"bid"}', "device-price") is None,
+            "mixed-case MREC marker must still be exact")
+    # A Banner log whose payload lists "mrec" placement ids stays a Banner row.
+    banner_with_mrec_ids = lc._parse_price_rotation_log(
+        'Unity : [Ad,Banner,MAX] MaxBannerRoute->_LogCallback: {"placement_ids":{"banner":"1","mrec":"2","rewarded":"3"}}',
+        "device-price",
+    )
+    _assert(banner_with_mrec_ids is not None and banner_with_mrec_ids["bidding_name"] == "Banner",
+            "a Banner log must keep the Banner ad type even when its payload mentions mrec")
+    _assert("selectedAdTypeFilters.includes(adType)" in source_text and "String(res.bidding_name || '').toLowerCase()" in source_text,
+            "Bidding ad type filter must use the row's [Ad,<Type> marker")
+    _assert("selectedAdTypeFilters.some(value => rawLog.includes(value))" not in source_text,
+            "Bidding ad type filter must not search payload words in the raw log")
 
     original_paused = lc.is_paused
     original_emit = lc.socketio.emit
