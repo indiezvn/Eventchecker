@@ -4747,7 +4747,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(92)</title>
+    <title>Event Inspector v2.5.0(93)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4948,7 +4948,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(92)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(93)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5788,6 +5788,7 @@ HTML_TEMPLATE = """
                     <div class="flex items-center gap-3 shrink-0 mr-3">
                         <button id="pausePackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-amber-500 hover:bg-amber-600 text-white">Pause</button>
                         <button id="stopPackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-red-500 hover:bg-red-600 text-white">Stop</button>
+                        <button id="clearPackageViewBtn" type="button" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200" title="Clear the rows on screen only. Recording keeps running and Recorded Logs still have every row.">Clear log</button>
                         <button id="searchPackageSessionBtn" type="button" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-slate-600 hover:bg-slate-700 text-white" title="Search every row of this session in saved history (Filter 1-3, Tag and quick filters)">Tìm toàn session</button>
                     </div>
                     <div class="w-44">
@@ -7994,11 +7995,13 @@ HTML_TEMPLATE = """
         let packageOlderLoading = false;
         let packageOlderExhausted = false;
         let packageSessionId = null;
+        // "Clear log" hides rows up to this seq on screen only.  The server
+        // store and the recorded SQLite session are not touched.
+        let packageClearedAtSeq = 0;
 
         function rebuildPackageView(state, signature) {
-            const live = packageUiPaused
-                ? lastPackageLogs.filter(row => row.seq <= packagePausedAtSeq)
-                : lastPackageLogs;
+            const live = lastPackageLogs.filter(row => row.seq > packageClearedAtSeq
+                && (!packageUiPaused || row.seq <= packagePausedAtSeq));
             const source = packageHistoryPrefix.length ? packageHistoryPrefix.concat(live) : live;
             packageView = filterPackageLogs(source, state);
             packageViewSignature = signature;
@@ -8138,7 +8141,8 @@ HTML_TEMPLATE = """
         function loadOlderPackageRows() {
             if (packageOlderLoading || packageOlderExhausted) return;
             const oldest = packageHistoryPrefix[0] || lastPackageLogs[0];
-            if (!oldest || !oldest.seq || oldest.seq <= 1) return;
+            // Never scroll back past a "Clear log" point.
+            if (!oldest || !oldest.seq || oldest.seq <= packageClearedAtSeq + 1) return;
             const requestStream = packageStreamId;
             const beforeSeq = oldest.seq;
             const params = new URLSearchParams({ before_seq: String(beforeSeq), limit: String(PACKAGE_OLDER_PAGE_ROWS) });
@@ -8150,7 +8154,7 @@ HTML_TEMPLATE = """
                 .then(data => {
                     if (requestStream !== packageStreamId) return;
                     if (!data.ok) throw new Error(data.error || 'failed_to_load_older_rows');
-                    const rows = (data.rows || []).filter(row => row.seq < beforeSeq);
+                    const rows = (data.rows || []).filter(row => row.seq < beforeSeq && row.seq > packageClearedAtSeq);
                     if (!data.has_more) packageOlderExhausted = true;
                     if (!rows.length) {
                         // Nothing older: only say so when older rows were
@@ -8410,6 +8414,7 @@ HTML_TEMPLATE = """
             packageOlderLoading = false;
             setPackageOlderStatus('');
             lastPackageSeq = 0;
+            packageClearedAtSeq = 0;
             lastPackageLogs = [];
             packageView = [];
             packageViewSignature = '';
@@ -9877,6 +9882,29 @@ HTML_TEMPLATE = """
             resetPackageLogUiState();
         });
 
+        // Clear the screen only: rows received so far are hidden, new rows keep
+        // showing.  Recording, the session and Recorded Logs keep every row.
+        document.getElementById('clearPackageViewBtn')?.addEventListener('click', () => {
+            packageClearedAtSeq = lastPackageSeq;
+            lastPackageLogs = [];
+            packageHistoryPrefix = [];
+            packageOlderExhausted = false;
+            setPackageOlderStatus('');
+            if (packageUiPaused) {
+                packagePausedAtSeq = lastPackageSeq;
+                packagePausedNewRows = 0;
+                updatePackagePauseLabel();
+            }
+            selectedPackageRowKeys.clear();
+            packageSelectionAnchor = null;
+            packageStickToBottom = true;
+            packageNewRowsWhileAway = 0;
+            updatePackageNewRowsButton();
+            const container = document.getElementById('packageLogContainer');
+            if (container) container.scrollTop = 0;
+            renderPackageLogTable(true);
+        });
+
         // --- Column Resizer (Package Log Table) ---
         (function setupColumnResizers() {
             let active = null;
@@ -10878,7 +10906,7 @@ DEFAULT_PACKAGE_QUICK_FILTERS = {
         {"id": "integrationhelper", "name": "Integrationhelper", "tag": "integrationhelper", "message1": "", "message2": "", "message3": ""},
         {"id": "appmetrica", "name": "Appmetrica", "tag": "appmetrica", "message1": "", "message2": "", "message3": ""},
         {"id": "adjust", "name": "Adjust", "tag": "adjust", "message1": "", "message2": "", "message3": ""},
-        {"id": "bidding", "name": "Bidding", "tag": "", "message1": "[ad,", "message2": "bidding", "message3": ""},
+        {"id": "bidding", "name": "Mediation", "tag": "", "message1": "[ad,", "message2": "", "message3": ""},
         {"id": "applovinsdk", "name": "Applovinsdk", "tag": "", "message1": "applovinsdk", "message2": "", "message3": ""},
         {"id": "event_tracking", "name": "Event tracking", "tag": "", "message1": "TrackingService->Track:", "message2": '"EventName":"', "message3": ""},
         {"id": "ads_event", "name": "Ads Event", "tag": "", "message1": "TrackingService->Track:", "message2": '"EventName":"ad', "message3": ""},
@@ -10887,7 +10915,7 @@ DEFAULT_PACKAGE_QUICK_FILTERS = {
         {"id": "integrationhelper", "name": "Integrationhelper", "tag": "", "message1": "integrationhelper", "message2": "", "message3": ""},
         {"id": "appmetrica", "name": "Appmetrica", "tag": "", "message1": "appmetrica", "message2": "", "message3": ""},
         {"id": "adjust", "name": "Adjust", "tag": "", "message1": "adjust]", "message2": "", "message3": ""},
-        {"id": "bidding", "name": "Bidding", "tag": "", "message1": "[ad,", "message2": "bidding", "message3": ""},
+        {"id": "bidding", "name": "Mediation", "tag": "", "message1": "[ad,", "message2": "", "message3": ""},
         {"id": "applovinsdk", "name": "Applovinsdk", "tag": "", "message1": "applovinsdk", "message2": "", "message3": ""},
         {"id": "event_tracking", "name": "Event tracking", "tag": "", "message1": "TrackingService->Track:", "message2": '"EventName":"', "message3": ""},
         {"id": "ads_event", "name": "Ads Event", "tag": "", "message1": "TrackingService->Track:", "message2": '"EventName":"ad', "message3": ""},
@@ -12958,12 +12986,13 @@ def package_log_rows_api():
         sql = f"""
             SELECT time_display, device_id, device_name, tag, message, raw_log
             {base_where}
-            ORDER BY id DESC
+            ORDER BY id ASC
             LIMIT ? OFFSET ?
         """
+        # Recorded Log reads a session from its first row: page 1 is the
+        # oldest rows and each next page (scroll / Load More) is newer.
         query_params = params + [limit, offset]
         rows = conn.execute(sql, query_params).fetchall()
-        rows = list(reversed(rows))
         loaded_count = offset + len(rows)
         return jsonify({
             "ok": True,
