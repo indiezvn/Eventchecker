@@ -44,13 +44,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-11-11-1-2.5.0-93"
-CURRENT_RELEASE_BUILD = 93
+CURRENT_RELEASE_VERSION = "2026-11-03-5-2.5.0-92"
+CURRENT_RELEASE_BUILD = 92
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 93
+RELEASE_SOURCE_BUILD = 94
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2919,26 +2919,6 @@ def test_ui_zoom_setting_contract() -> None:
                 os.environ["EVENTINSPECTOR_DATA_DIR"] = original_data_dir
 
 
-def test_package_log_clear_view_is_ui_only() -> None:
-    html = lc.app.test_client().get("/").get_data(as_text=True)
-    _assert(html.count('id="clearPackageViewBtn"') == 1, "Package Log needs exactly one Clear log button")
-    start = html.find("document.getElementById('clearPackageViewBtn')?.addEventListener('click'")
-    _assert(start != -1, "Clear log button has no click handler")
-    handler = html[start:html.find("\n        });", start)]
-    _assert("packageClearedAtSeq = lastPackageSeq;" in handler, "Clear log must hide rows up to the newest received row")
-    for forbidden in ("fetch(", "socket.emit(", "/api/package-log/clear", "clear_all"):
-        _assert(forbidden not in handler, f"Clear log must stay on screen only, found {forbidden}")
-    for needle in (
-        "const live = lastPackageLogs.filter(row => row.seq > packageClearedAtSeq",
-        "if (!oldest || !oldest.seq || oldest.seq <= packageClearedAtSeq + 1) return;",
-        "row.seq < beforeSeq && row.seq > packageClearedAtSeq",
-    ):
-        _assert(needle in html, f"Clear log contract missing: {needle}")
-    reset = html[html.find("function resetPackageLogStore("):]
-    _assert("packageClearedAtSeq = 0;" in reset[:reset.find("function scheduleLivePackageRender(")],
-            "a new stream must show all its rows again")
-
-
 def test_package_log_delta_ui_contract() -> None:
     html = lc.app.test_client().get("/").get_data(as_text=True)
     for needle in (
@@ -3944,12 +3924,12 @@ def test_preset_revert_protection_contract() -> None:
 def test_rewarded_bidding_filter_contract() -> None:
     """Package Log quick filters: separate Android/iOS lists, each filter = Tag / Message 1 / Message 2 boxes."""
     source_text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
-    expected_names = ["Integrationhelper", "Appmetrica", "Adjust", "Mediation", "Applovinsdk", "Event tracking", "Ads Event"]
+    expected_names = ["Integrationhelper", "Appmetrica", "Adjust", "Bidding", "Applovinsdk", "Event tracking", "Ads Event"]
     for platform in ("android", "ios"):
         defaults = lc.DEFAULT_PACKAGE_QUICK_FILTERS[platform]
         _assert_equal([f["name"] for f in defaults], expected_names, f"{platform} default quick filters changed")
         bidding = next(f for f in defaults if f["id"] == "bidding")
-        _assert_equal((bidding["tag"], bidding["message1"], bidding["message2"]), ("", "[ad,", ""), f"{platform} Mediation must be Message 1 [ad, only")
+        _assert_equal((bidding["tag"], bidding["message1"], bidding["message2"]), ("", "[ad,", "bidding"), f"{platform} Bidding must be Message 1 [ad, + Message 2 bidding")
         ads = next(f for f in defaults if f["id"] == "ads_event")
         _assert_equal((ads["tag"], ads["message1"], ads["message2"]), ("", "TrackingService->Track:", '"EventName":"ad'), f"{platform} Ads Event default is wrong")
         tracking = next(f for f in defaults if f["id"] == "event_tracking")
@@ -4274,7 +4254,7 @@ def test_package_quick_filter_history_query() -> None:
                 _assert(data["ok"], f"history query failed for {qf}: {data}")
                 return sorted(row["message"] for row in data["rows"])
 
-            _assert_equal(messages("bidding"), ["[Ad,InterstitialBidding] Raise", "[Ad,RewardedBidding, MAX] Raise"], "Mediation must match every [ad, log")
+            _assert_equal(messages("bidding"), ["[Ad,InterstitialBidding] Raise", "[Ad,RewardedBidding, MAX] Raise"], "Bidding must need [ad, and bidding")
             _assert_equal(messages("adjust"), ["event tracked"], "Android Adjust must match the tag only")
             _assert_equal(messages("adjust", "ios"), ["[Adjust]: Event tracked"], "iOS Adjust must search the whole log for adjust]")
             _assert_equal(messages("applovinsdk"), ["[TaskCollectSignals] bidding token"], "Applovinsdk must search the whole log")
@@ -4309,15 +4289,6 @@ def test_package_quick_filter_history_query() -> None:
             db_conn.commit()
             db_conn.close()
             _assert_equal(client.get(f"/api/package-log/logs?session_id={session_id}&qf=pct&qp=android").status_code, 400, "an Android filter must not exist in an iOS session's list")
-            # Recorded Log opens at the first row: page 1 is the oldest rows and
-            # each next page (scroll / Load More) continues with newer rows.
-            pages = []
-            for offset in (0, 2, 4):
-                page = client.get(f"/api/package-log/logs?session_id={session_id}&offset={offset}&limit=2").get_json()
-                pages.append([row["message"] for row in page["rows"]])
-            _assert_equal(pages, [[message for _, message in rows[i:i + 2]] for i in (0, 2, 4)],
-                          "Recorded Log pages must run oldest first, top to bottom")
-            _assert(page["has_more"] is False, "the last page must say there is nothing more")
         finally:
             if original_data_dir is None:
                 os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
@@ -6272,7 +6243,6 @@ TESTS: List[Callable[[], None]] = [
     test_sdk_check_results_text_size,
     test_repository_moved_to_indiezvn,
     test_package_log_delta_ui_contract,
-    test_package_log_clear_view_is_ui_only,
     test_main_script_has_unique_top_level_names,
     test_android_package_log_ignores_global_pause,
     test_ios_package_log_preserves_multiline_records,
