@@ -28,6 +28,10 @@
       "android": {
         "id": "com.indiez.idletycoon.horse.racing",
         "label": "HR - com.indiez.idletycoon.horse.racing"
+      },
+      "ios": {
+        "id": "HorseRacing",
+        "label": "HR - HorseRacing"
       }
     },
     {
