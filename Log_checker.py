@@ -2118,32 +2118,16 @@ IOS_FIREBASE_EVENT_PATTERN = re.compile(
     re.IGNORECASE
 )
 LEVELPLAY_IMPRESSION_DATA_MAPPER_KEYWORD = "LevelPlayAdImpressionEventMapper->Map"
-ASCENDX_CALLBACK_EVENTS = (
-    "_OnAdLoadedEvent",
-    "_OnAdImpressionEvent",
-    "_OnAdDisplayedEvent",
-    "_OnAdClickedEvent",
-    "_OnAdClosedEvent",
-    "_OnAdReceivedRewardEvent",
-)
-CLOUDX_CALLBACK_EVENTS = (
-    "OnAdLoadFailed",
-    "OnAdLoadSuccess",
-    "OnAdRevenuePaid",
-    "OnAdClicked",
-    "OnAdShowSuccess",
-    "OnAdRewarded",
-    "OnAdHidden",
-)
+# AppLovin MAX callbacks written by the game's MAX routes, e.g.
+# "[Ad,Interstitial, MAX] MaxInterstitialRoute->_OnAdRevenuePaid: {...}".
+# The route names the ad type; only On... callbacks are listed (TryLoad,
+# _SetState and _LogCallback are route bookkeeping, not ad callbacks).
+MAX_CALLBACK_PATTERN = re.compile(r"\bMax(Rewarded|Interstitial|Banner|Mrec)Route->_?(On\w+)", re.IGNORECASE)
 CALLBACK_LOG_PATTERN = re.compile(
     r"(LevelPlayAdImpressionEventMapper->Map|_OnImpressionDataReadyEvent|"
     r"_OnLevelPlayImpressionDataReadyEvent|LevelPlayInterstitialAdListener|"
     r"LevelPlayBannerAdViewListener|LevelPlayRewardedAdListener|"
-    r"Receive Ironsource Impression Data LevelPlayImpressionData|"
-    r"_OnAdLoadedEvent|_OnAdImpressionEvent|_OnAdDisplayedEvent|"
-    r"_OnAdClickedEvent|_OnAdClosedEvent|_OnAdReceivedRewardEvent|"
-    r"OnAdLoadFailed|OnAdLoadSuccess|OnAdRevenuePaid|OnAdClicked|"
-    r"OnAdShowSuccess|OnAdRewarded|OnAdHidden)"
+    r"Receive Ironsource Impression Data LevelPlayImpressionData)"
 )
 ADREVENUE_LOG_PATTERN = re.compile(r"AdRevenue Received:\s*AdRevenue\{(.*)\}")
 APPSFLYER_ADREVENUE_PATTERN = re.compile(r"\b(ADREVENUE)-\d+:\s*preparing data:\s*(\{.*\})", re.IGNORECASE)
@@ -3796,36 +3780,7 @@ def _levelplay_impression_data_event_name(data):
     return f"LevelPlayImpressionData - {ad_unit_name}" if ad_unit_name else "LevelPlayImpressionData"
 
 
-def _find_named_callback_event(log_entry, event_names):
-    raw_log = str(log_entry or "")
-    return next((event_name for event_name in event_names if event_name in raw_log), "")
-
-
-def _named_callback_ad_unit_label(log_entry, event_name=""):
-    """Resolve the Reward/Interstitial suffix used by AscendX and CloudX callbacks."""
-    if event_name in {"_OnAdReceivedRewardEvent", "OnAdRewarded"}:
-        return "Reward"
-
-    raw_log = str(log_entry or "")
-    json_str = extract_json_object_from_text(raw_log)
-    if json_str:
-        data = _parse_callback_json_payload(json_str)
-        if data is not None:
-            for key in ("adUnitName", "mediationAdUnitName", "adUnit", "adFormat", "ad_format", "format"):
-                value = _find_first_key_deep(data, {key})
-                label = _normalize_ad_format_label(value)
-                if label in {"Reward", "Interstitial"}:
-                    return label
-
-    lowered = raw_log.lower()
-    if re.search(r"\binterstitial\b", lowered):
-        return "Interstitial"
-    if re.search(r"\breward(?:ed)?\b|rewarded[_ -]?video", lowered):
-        return "Reward"
-    return ""
-
-
-def _record_named_provider_callback(log_entry, device_id, event_name, callback_type):
+def _record_named_provider_callback(log_entry, device_id, event_name, callback_type, ad_unit_label=""):
     after_keyword = str(log_entry or "").split(event_name, 1)[1].strip()
     json_str = extract_json_object_from_text(after_keyword)
     details = "Callback fired"
@@ -3843,7 +3798,6 @@ def _record_named_provider_callback(log_entry, device_id, event_name, callback_t
     elif after_keyword:
         details = f'<div class="text-xs font-mono break-all">{html.escape(after_keyword.lstrip(":").strip())}</div>'
 
-    ad_unit_label = _named_callback_ad_unit_label(log_entry, event_name)
     display_name = f"{event_name} - {ad_unit_label}" if ad_unit_label else event_name
     _append_callback_ad_row({
         "device_id": device_id,
@@ -4747,7 +4701,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(93)</title>
+    <title>Event Inspector v2.5.0(94)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4948,7 +4902,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(93)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(94)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5356,12 +5310,8 @@ HTML_TEMPLATE = """
                                     <span class="ml-2 text-sm text-gray-900">Callback Levelplay</span>
                                 </label>
                                 <label class="inline-flex items-center whitespace-nowrap">
-                                    <input id="callbackTypeAscendx" name="callbackType" type="checkbox" value="ascendx_callback" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
-                                    <span class="ml-2 text-sm text-gray-900">Callback Ascendx</span>
-                                </label>
-                                <label class="inline-flex items-center whitespace-nowrap">
-                                    <input id="callbackTypeCloudx" name="callbackType" type="checkbox" value="cloudx_callback" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
-                                    <span class="ml-2 text-sm text-gray-900">Callback Cloudx</span>
+                                    <input id="callbackTypeMax" name="callbackType" type="checkbox" value="max_callback" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
+                                    <span class="ml-2 text-sm text-gray-900">Callback Max</span>
                                 </label>
                                 <label class="inline-flex items-center whitespace-nowrap">
                                     <input id="callbackTypeGadsme" name="callbackType" type="checkbox" value="gadsme_callback" class="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
@@ -7724,8 +7674,7 @@ HTML_TEMPLATE = """
                     callback: 'Callback Levelplay',
                     gadsme_callback: 'Callback Gadsme',
                     adverty5_callback: 'Callback Adverty5',
-                    ascendx_callback: 'Callback Ascendx',
-                    cloudx_callback: 'Callback Cloudx',
+                    max_callback: 'Callback Max',
                     ad_event: 'Ad Event',
                 };
                 if (selectedTypeFilters.length > 0 && !selectedTypeFilters.some(value => callbackTypeMap[value] === r.type)) return false;
@@ -8931,6 +8880,13 @@ HTML_TEMPLATE = """
         const IOS_SYSLOG_HEADER_PATTERN = /[A-Z][a-z]{2}\\s+\\d{1,2}\\s+\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?\\s+\\S+\\s+[^\\s\\[]+\\[\\d+\\]\\s+<\\w+>:\\s/;
         const LOG_JOIN_MAX_LINES = 40;
 
+        // iOS syslog writes a backslash as the octal escape \\134, so an escaped
+        // quote inside a JSON string (\\") arrives as \\134". Decode it before
+        // reading JSON; the raw log shown to the user keeps the original text.
+        function decodeIosSyslogEscapes(text) {
+            return String(text || '').replace(/\\\\134/g, '\\\\');
+        }
+
         function logMessageCore(text) {
             const match = LOGCAT_HEADER_PATTERN.exec(text || '') || IOS_SYSLOG_HEADER_PATTERN.exec(text || '');
             return match ? text.slice(match.index + match[0].length) : (text || '');
@@ -8967,14 +8923,14 @@ HTML_TEMPLATE = """
             const groups = [];
             for (let i = 0; i < rows.length; i++) {
                 const line = getRowText(rows[i]);
-                const first = logMessageCore(getRowMessageText(rows[i]) || line);
+                const first = decodeIosSyslogEscapes(logMessageCore(getRowMessageText(rows[i]) || line));
                 const group = { rows: [rows[i]], lines: [line], text: first };
                 if (jsonLooksTruncated(first)) {
                     const prefix = first.slice(0, first.search(JSON_START_PATTERN));
                     let joined = first, j = i + 1;
                     while (j < rows.length && j - i < LOG_JOIN_MAX_LINES) {
                         const nextLine = getRowText(rows[j]);
-                        let part = logMessageCore(getRowMessageText(rows[j]) || nextLine);
+                        let part = decodeIosSyslogEscapes(logMessageCore(getRowMessageText(rows[j]) || nextLine));
                         if (prefix.trim() && part.startsWith(prefix)) part = part.slice(prefix.length);
                         else if (prefix.trim() && part.trimStart().startsWith(prefix.trim())) part = part.trimStart().slice(prefix.trim().length).trimStart();
                         joined += part;
@@ -14170,16 +14126,13 @@ def process_callback_and_ad_event_log(log_entry, device_id, event_name=None, act
         })
         return
 
-    # --- 0c. Process AscendX callbacks ---
-    ascendx_event = _find_named_callback_event(log_entry, ASCENDX_CALLBACK_EVENTS)
-    if ascendx_event:
-        _record_named_provider_callback(log_entry, device_id, ascendx_event, "Callback Ascendx")
-        return
-
-    # --- 0d. Process CloudX callbacks ---
-    cloudx_event = _find_named_callback_event(log_entry, CLOUDX_CALLBACK_EVENTS)
-    if cloudx_event:
-        _record_named_provider_callback(log_entry, device_id, cloudx_event, "Callback Cloudx")
+    # --- 0c. Process AppLovin MAX callbacks ---
+    max_match = MAX_CALLBACK_PATTERN.search(log_entry)
+    if max_match:
+        _record_named_provider_callback(
+            log_entry, device_id, max_match.group(2), "Callback Max",
+            _normalize_ad_format_label(max_match.group(1)),
+        )
         return
 
     # --- 0e. Process Gadsme callbacks ---
