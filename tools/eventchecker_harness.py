@@ -44,13 +44,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-11-13-1-2.5.0-94"
-CURRENT_RELEASE_BUILD = 94
+CURRENT_RELEASE_VERSION = "2026-11-11-1-2.5.0-93"
+CURRENT_RELEASE_BUILD = 93
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 94
+RELEASE_SOURCE_BUILD = 95
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -2636,12 +2636,6 @@ def test_log_detail_joins_split_json() -> None:
                    "function expandNestedJson(value, depth = 0) {", "const parsed = expandNestedJson(JSON.parse(jsonStr));",
                    "const IOS_SYSLOG_HEADER_PATTERN = /", "LOGCAT_HEADER_PATTERN.exec(text || '') || IOS_SYSLOG_HEADER_PATTERN.exec(text || '')"):
         _assert(needle in html, f"split-log JSON join is missing {needle}")
-    # iOS syslog writes a backslash as \134; both parts are decoded before the
-    # JSON is read, so an iOS split config joins like an Android one.
-    for needle in ("function decodeIosSyslogEscapes(text) {", "return String(text || '').replace(/\\\\134/g, '\\\\');",
-                   "const first = decodeIosSyslogEscapes(logMessageCore(",
-                   "let part = decodeIosSyslogEscapes(logMessageCore("):
-        _assert(needle in html, f"iOS split-log JSON join is missing {needle}")
 
 def test_performance_ios_tool_detection() -> None:
     """The app finds a Python with pymobiledevice3 >= 9.30, or says per platform what to install."""
@@ -4840,26 +4834,40 @@ def test_levelplay_impression_data_callback_contract() -> None:
         lc.socketio.emit = original_emit
 
 
-def test_max_callback_contract() -> None:
-    """Callback tab: MAX route callbacks are "Callback Max"; Ascendx/Cloudx are gone."""
+def test_ascendx_cloudx_callback_contract() -> None:
     source_text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
-    for marker in (
-        'value="max_callback"',
-        "max_callback: 'Callback Max',",
+    required_markers = (
+        "_OnAdLoadedEvent",
+        "_OnAdImpressionEvent",
+        "_OnAdDisplayedEvent",
+        "_OnAdClickedEvent",
+        "_OnAdClosedEvent",
+        "_OnAdReceivedRewardEvent",
+        "OnAdLoadFailed",
+        "OnAdLoadSuccess",
+        "OnAdRevenuePaid",
+        "OnAdClicked",
+        "OnAdShowSuccess",
+        "OnAdRewarded",
+        "OnAdHidden",
+        'value="ascendx_callback"',
+        'value="cloudx_callback"',
+        "Callback Ascendx",
+        "Callback Cloudx",
         "Callback Levelplay",
         'id="callbackTypeAll" name="callbackType" type="checkbox"',
         'id="callbackTypeCallback" name="callbackType" type="checkbox"',
-        'id="callbackTypeMax" name="callbackType" type="checkbox"',
+        'id="callbackTypeAscendx" name="callbackType" type="checkbox"',
+        'id="callbackTypeCloudx" name="callbackType" type="checkbox"',
         'id="callbackTypeGadsme" name="callbackType" type="checkbox"',
         'id="callbackTypeAdverty5" name="callbackType" type="checkbox"',
         "selectedTypeFilters",
         "bindCallbackCheckboxGroup",
         'details-cell text-sm align-top"><div class="max-h-64 overflow-auto">${res.details}',
         'log-cell text-xs font-normal text-gray-600 align-top"><div class="max-h-64 overflow-auto whitespace-pre-wrap break-all">',
-    ):
-        _assert(marker in source_text, f"MAX callback contract is missing: {marker}")
-    for gone in ("Callback Ascendx", "Callback Cloudx", "ascendx_callback", "cloudx_callback", "callbackTypeAscendx", "callbackTypeCloudx"):
-        _assert(gone not in source_text, f"Callback tab must not keep {gone}")
+    )
+    for marker in required_markers:
+        _assert(marker in source_text, f"AscendX/CloudX callback contract is missing: {marker}")
 
     original_paused = lc.is_paused
     original_emit = lc.socketio.emit
@@ -4871,47 +4879,47 @@ def test_max_callback_contract() -> None:
         lc.socketio.emit = lambda event, payload: emitted.append((event, payload))
         lc._clear_live_table_pending()
 
-        max_lines = (
-            ('Nov 13 10:38:07 iPhone-12 PixelArt(UnityFramework)[690] <Notice>: [Ad,Interstitial, MAX] MaxInterstitialRoute->_OnAdRevenuePaid: {"AdLoadState":0,"Error":null}',
-             "OnAdRevenuePaid - Interstitial"),
-            ('11-11 09:21:11.729 13209 13307 I Unity   : [Ad,Rewarded, MAX] MaxRewardedRoute->_OnAdLoadFailed: {"code":204}',
-             "OnAdLoadFailed - Reward"),
-            ('11-11 09:21:11.729 13209 13307 I Unity   : [Ad,Banner,MAX] MaxBannerRoute->_OnAdClicked: {"placement":"bottom_banner"}',
-             "OnAdClicked - Banner"),
-            ('11-11 09:21:11.729 13209 13307 I Unity   : [Ad,Mrec,MAX] MaxMrecRoute->_OnAdHidden',
-             "OnAdHidden - MREC"),
-        )
-        for line, _ in max_lines:
+        for callback_event in lc.ASCENDX_CALLBACK_EVENTS:
+            ad_unit = "Reward" if callback_event == "_OnAdReceivedRewardEvent" else "Interstitial"
+            line = f"Unity [Ad,AscendX,{ad_unit}] {callback_event}"
             lc.process_callback_and_ad_event_log(line, "device-callback")
+
+        for callback_event in lc.CLOUDX_CALLBACK_EVENTS:
+            ad_unit = "Reward" if callback_event == "OnAdRewarded" else "Interstitial"
+            line = f"Unity [Ad,CloudX,{ad_unit}] {callback_event}"
+            lc.process_callback_and_ad_event_log(line, "device-callback")
+
         rows = list(lc.callback_ad_logs)
-        _assert_equal([row["type"] for row in rows], ["Callback Max"] * len(max_lines), "MAX route callbacks must be Callback Max")
-        _assert_equal([row["event_name"] for row in rows], [name for _, name in max_lines], "MAX callback name or ad type is wrong")
-        _assert_equal(json.loads(rows[0]["json_data"]), {"AdLoadState": 0, "Error": None}, "MAX callback JSON details were not parsed")
-        _assert_equal([row["raw_log"] for row in rows], [line for line, _ in max_lines], "MAX callback raw logs were not preserved")
-        _assert_equal(len(_live_rows_sent(emitted, "callback")), len(rows), "MAX callbacks were not emitted to the Callback tab")
-
-        # Route bookkeeping and the removed Ascendx/Cloudx providers add no row.
-        for line in (
-            '11-11 09:21:11.729 I Unity   : [Ad,Interstitial, MAX] MaxInterstitialRoute->TryLoad: {"act":"skipLoad"}',
-            '11-11 09:21:11.729 I Unity   : [Ad,Rewarded, MAX] MaxRewardedRoute->_SetState: Loading',
-            '11-11 09:21:11.729 I Unity   : [Ad,Banner,MAX] MaxBannerRoute->_LogCallback: {"banner":"1"}',
-            "Unity [Ad,AscendX,Interstitial] _OnAdLoadedEvent",
-            "Unity [Ad,AscendX,Reward] _OnAdReceivedRewardEvent",
-            "Unity [Ad,CloudX,Interstitial] OnAdRevenuePaid",
-            "Unity [Ad,CloudX,Reward] OnAdRewarded",
-        ):
-            lc.process_callback_and_ad_event_log(line, "device-callback")
-        _assert_equal(len(lc.callback_ad_logs), len(max_lines), "non-callback MAX lines or Ascendx/Cloudx lines must add no Callback row")
-
-        # LevelPlay listeners still land in Callback Levelplay.
-        lc.process_callback_and_ad_event_log("Unity LevelPlayRewardedAdListener OnAdRewarded adInfo: adUnit:rewarded", "device-callback")
-        _assert_equal(lc.callback_ad_logs[-1]["type"], "Callback Levelplay", "LevelPlay listener callbacks must stay Callback Levelplay")
+        _assert_equal(len(rows), len(lc.ASCENDX_CALLBACK_EVENTS) + len(lc.CLOUDX_CALLBACK_EVENTS), "provider callback row count changed")
+        _assert_equal(
+            [row["type"] for row in rows[:len(lc.ASCENDX_CALLBACK_EVENTS)]],
+            ["Callback Ascendx"] * len(lc.ASCENDX_CALLBACK_EVENTS),
+            "AscendX callback rows use the wrong filter type",
+        )
+        _assert_equal(
+            [row["type"] for row in rows[len(lc.ASCENDX_CALLBACK_EVENTS):]],
+            ["Callback Cloudx"] * len(lc.CLOUDX_CALLBACK_EVENTS),
+            "CloudX callback rows use the wrong filter type",
+        )
+        _assert_equal(rows[0]["event_name"], "_OnAdLoadedEvent - Interstitial", "AscendX ad unit name was not added")
+        _assert_equal(rows[5]["event_name"], "_OnAdReceivedRewardEvent - Reward", "AscendX reward name was not added")
+        _assert_equal(rows[6]["event_name"], "OnAdLoadFailed - Interstitial", "CloudX ad unit name was not added")
+        _assert_equal(rows[11]["event_name"], "OnAdRewarded - Reward", "CloudX reward name was not added")
+        _assert(all(row["raw_log"].startswith("Unity [Ad,") for row in rows), "provider callback raw logs were not preserved")
+        _assert_equal(len(_live_rows_sent(emitted, "callback")), len(rows), "provider callbacks were not emitted to the Callback tab")
 
         rendered = lc.app.test_client().get("/").get_data(as_text=True)
-        _assert('id="callbackTypeMax"' in rendered and 'value="max_callback"' in rendered, "rendered Callback Max filter is missing")
+        for marker in (
+            'id="callbackTypeAscendx"',
+            'id="callbackTypeCloudx"',
+            'value="ascendx_callback"',
+            'value="cloudx_callback"',
+        ):
+            _assert(marker in rendered, f"rendered callback filter is missing: {marker}")
         ordered_filters = [
             rendered.index('id="callbackTypeCallback"'),
-            rendered.index('id="callbackTypeMax"'),
+            rendered.index('id="callbackTypeAscendx"'),
+            rendered.index('id="callbackTypeCloudx"'),
             rendered.index('id="callbackTypeGadsme"'),
             rendered.index('id="callbackTypeAdverty5"'),
         ]
@@ -6296,7 +6304,7 @@ TESTS: List[Callable[[], None]] = [
     test_ios_load_ads_max_viewability_record_boundary_contract,
     test_ios_load_ads_max_delegate_contract,
     test_levelplay_impression_data_callback_contract,
-    test_max_callback_contract,
+    test_ascendx_cloudx_callback_contract,
     test_release_payload_sync,
     test_macos_architecture_contract,
     test_update_candidate_does_not_downgrade,
