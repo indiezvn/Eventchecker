@@ -6,11 +6,11 @@ rem Use this only while Event Inspector is fully closed.
 
 set "APP_SUPPORT_DIR=%LOCALAPPDATA%\EventInspector"
 set "MANIFEST_URL=https://raw.githubusercontent.com/indiezvn/Eventchecker/main/Updates_2_5/remote_manifest.json"
-set "TARGET_VERSION=2026-11-13-1-2.5.0-94"
+set "TARGET_VERSION=2026-11-13-2-2.5.0-95"
 set "UPDATES_DIR_V250=%APP_SUPPORT_DIR%\updates_v250"
 
 echo Event Inspector update reset (Windows)
-echo Target release: v2.5.0(94)
+echo Target release: v2.5.0(95)
 echo Target folder: %APP_SUPPORT_DIR%
 echo.
 echo Make sure Event Inspector is fully closed before continuing.
