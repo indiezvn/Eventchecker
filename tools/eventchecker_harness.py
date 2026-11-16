@@ -51,7 +51,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 95
+RELEASE_SOURCE_BUILD = 96
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -4203,12 +4203,68 @@ def test_package_quick_filters_api() -> None:
                 os.environ["EVENTINSPECTOR_DATA_DIR"] = original_data_dir
 
 
+def test_macos_restart_relaunches_through_launchservices() -> None:
+    """After an update, the Mac app restarts through `open` once the old process is gone."""
+    _assert_equal(lc._macos_app_bundle("/Applications/EventInspector.app/Contents/MacOS/EventInspector"),
+                  "/Applications/EventInspector.app" if sys.platform == "darwin" else "", "the .app bundle must be found from the executable")
+    _assert_equal(lc._macos_app_bundle("/usr/bin/python3"), "", "a non-bundle executable must keep the old restart")
+    calls = []
+
+    class _Exit(Exception):
+        pass
+
+    def fake_popen(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+
+    def fake_exit(code):
+        raise _Exit(code)
+
+    original = (lc.subprocess.Popen, lc.os._exit, lc.sys.platform, os.environ.get("EVENTINSPECTOR_RESTART_CMD"), os.environ.get("EVENTINSPECTOR_RESTART_ARGS"))
+    try:
+        lc.subprocess.Popen, lc.os._exit = fake_popen, fake_exit
+        lc.sys.platform = "darwin"
+        os.environ["EVENTINSPECTOR_RESTART_CMD"] = "/Applications/EventInspector.app/Contents/MacOS/EventInspector"
+        os.environ["EVENTINSPECTOR_RESTART_ARGS"] = ""
+        try:
+            lc.app.test_client().post("/restart_app")
+        except _Exit:
+            pass
+        _assert_equal(len(calls), 1, "restart must start exactly one relauncher")
+        argv, kwargs = calls[0]
+        _assert_equal(argv[:3], ["/bin/sh", "-c", lc.MACOS_RELAUNCH_SCRIPT], "Mac restart must go through the relaunch script")
+        _assert_equal(argv[4:], [str(os.getpid()), "/Applications/EventInspector.app"], "relauncher must wait for this process and open the bundle")
+        _assert(kwargs.get("start_new_session") is True, "relauncher must outlive the app process")
+        _assert('kill -0 "$1"' in lc.MACOS_RELAUNCH_SCRIPT and 'exec /usr/bin/open -a "$2"' in lc.MACOS_RELAUNCH_SCRIPT,
+                "relauncher must wait for the old process, then open the bundle")
+
+        calls.clear()
+        os.environ["EVENTINSPECTOR_RESTART_CMD"] = "/usr/bin/python3"
+        os.environ["EVENTINSPECTOR_RESTART_ARGS"] = "/tmp/desktop_app.py"
+        try:
+            lc.app.test_client().post("/restart_app")
+        except _Exit:
+            pass
+        _assert_equal(calls[0][0], ["/usr/bin/python3", "/tmp/desktop_app.py"], "source runs keep the direct restart")
+    finally:
+        lc.subprocess.Popen, lc.os._exit, lc.sys.platform = original[0], original[1], original[2]
+        for key, value in (("EVENTINSPECTOR_RESTART_CMD", original[3]), ("EVENTINSPECTOR_RESTART_ARGS", original[4])):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_package_quick_filter_upgrade_backup_export_import() -> None:
     """User filters survive updates, new defaults are appended once, broken files are kept, export/import round-trips."""
     original_data_dir = os.environ.get("EVENTINSPECTOR_DATA_DIR")
+    original_home = {key: os.environ.get(key) for key in ("HOME", "USERPROFILE")}
     original_defaults = lc.DEFAULT_PACKAGE_QUICK_FILTERS
     with tempfile.TemporaryDirectory() as temp_dir:
         os.environ["EVENTINSPECTOR_DATA_DIR"] = temp_dir
+        # A home without Downloads first, so exports never touch the real Downloads folder.
+        fake_home = os.path.join(temp_dir, "home")
+        os.makedirs(fake_home)
+        os.environ["HOME"] = os.environ["USERPROFILE"] = fake_home
         try:
             client = lc.app.test_client()
             path = os.path.join(temp_dir, "package_quick_filters_android.json")
@@ -4250,7 +4306,7 @@ def test_package_quick_filter_upgrade_backup_export_import() -> None:
                 with open(os.path.join(temp_dir, backups[0]), encoding="utf-8") as handle:
                     _assert_equal(handle.read(), broken, "the backup must hold the original bytes")
 
-            # Export writes a file (no app window here, so into <data dir>/exports).
+            # Export writes a file (no app window, no Downloads folder: into <data dir>/exports).
             _assert_equal(client.post("/api/package-quick-filters/export", json={"platform": "android", "filters": [dict(mine, name="")]}).status_code, 400, "invalid filters must not be exported")
             exported = client.post("/api/package-quick-filters/export", json={"platform": "android", "filters": kept}).get_json()
             _assert(exported["ok"] and exported["path"].startswith(os.path.join(temp_dir, "exports")), f"export failed: {exported}")
@@ -4264,6 +4320,13 @@ def test_package_quick_filter_upgrade_backup_export_import() -> None:
             _assert(download["ok"] and download["filename"].startswith("quick_filters_android_") and download["filename"].endswith(".json"), f"download export failed: {download}")
             _assert_equal(json.loads(download["content"]), data, "download content must equal the exported file")
             _assert_equal(sorted(os.listdir(os.path.join(temp_dir, "exports"))), exports_before, "download mode must not write a file on the server")
+            # With a Downloads folder, exports go there by default.
+            os.makedirs(os.path.join(fake_home, "Downloads"))
+            to_downloads = client.post("/api/package-quick-filters/export", json={"platform": "android", "filters": kept}).get_json()
+            _assert(to_downloads["ok"] and os.path.dirname(to_downloads["path"]) == os.path.join(fake_home, "Downloads"),
+                    f"export must default to the Downloads folder: {to_downloads}")
+            _assert_equal(lc._default_export_dir(os.path.join(temp_dir, "unused")), os.path.join(fake_home, "Downloads"),
+                          "Package Log export must default to Downloads too")
             html = client.get("/").get_data(as_text=True)
             _assert("var packageNativeFileDialog = false;" in html, "without an app window the page must use the browser save path")
             _assert("window.showSaveFilePicker" in html and "download: true" in html, "browser export must let the user choose where to save")
@@ -4279,6 +4342,11 @@ def test_package_quick_filter_upgrade_backup_export_import() -> None:
             ios_with_tag = {"platform": "ios", "filters": [dict(mine, tag="Unity")]}
             _assert_equal(client.post("/api/package-quick-filters/import", json={"platform": "ios", "data": ios_with_tag}).status_code, 400, "iOS import must refuse a tag")
         finally:
+            for key, value in original_home.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
             lc.DEFAULT_PACKAGE_QUICK_FILTERS = original_defaults
             if original_data_dir is None:
                 os.environ.pop("EVENTINSPECTOR_DATA_DIR", None)
@@ -6316,6 +6384,7 @@ TESTS: List[Callable[[], None]] = [
     test_package_log_reset_and_sync_protocol,
     test_package_log_raw_and_db_seq_contract,
     test_package_log_db_drop_diagnostics,
+    test_macos_restart_relaunches_through_launchservices,
     test_package_log_db_writer_survives_write_errors,
     test_package_log_older_rows_and_db_status,
     test_package_log_stuck_sessions_and_row_counts,
