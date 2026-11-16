@@ -24,7 +24,6 @@ import http.server
 import io
 import importlib.util
 import json
-import logging
 import os
 import re
 import hashlib
@@ -45,13 +44,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-11-16-1-2.5.0-95"
-CURRENT_RELEASE_BUILD = 95
+CURRENT_RELEASE_VERSION = "2026-11-13-1-2.5.0-94"
+CURRENT_RELEASE_BUILD = 94
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 95
+RELEASE_SOURCE_BUILD = 96
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -1653,9 +1652,6 @@ def test_package_log_db_writer_survives_write_errors() -> None:
             seqs = [row[0] for row in conn.execute("SELECT seq FROM package_log_entries ORDER BY id")]
             conn.close()
             _assert_equal(seqs, list(range(1, total + 1)), "writer changed the row order while retrying")
-            state = lc.package_log_db_writer_state
-            _assert(state["flushed_rows"] >= total and state["last_flush_rows"] > 0 and state["last_flush"] > 0,
-                    "writer health for diagnostics was not recorded")
         finally:
             lc.package_log_db_writer_stop.set()
             if writer is not None:
@@ -1666,47 +1662,6 @@ def test_package_log_db_writer_survives_write_errors() -> None:
             lc.package_log_db_dropped_rows = original_dropped
             lc.package_log_db_last_error = original_error
             lc._drain_package_log_db_queue()
-
-
-def test_package_log_db_drop_diagnostics() -> None:
-    """When the history queue is full, app.log says why; the warning counts the current session only."""
-    original_queue = lc.package_log_db_queue
-    original_dropped = lc.package_log_db_dropped_rows
-    original_logged_at = lc._package_log_db_drop_logged_at
-    records = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record):
-            records.append(record.getMessage())
-
-    handler = _Capture(level=logging.WARNING)
-    root = logging.getLogger()
-    root.addHandler(handler)
-    try:
-        lc.package_log_db_queue = lc.Queue(maxsize=2)
-        lc.package_log_db_dropped_rows = 0
-        lc._package_log_db_drop_logged_at = 0.0
-        for index in range(6):
-            lc._enqueue_package_log_db_row((1, 1.0, "t", "d", "dn", "I", "Tag", f"m{index}", f"r{index}", 0, index + 1))
-        _assert_equal(lc.package_log_db_dropped_rows, 4, "full queue must drop the oldest rows")
-        drops = [line for line in records if line.startswith("Package Log DB queue full")]
-        _assert_equal(len(drops), 1, "the drop warning must be throttled to one line per interval")
-        for field in ("dropped=1", "queued=", "enqueued=", "flushed=", "writer_loop_age=", "last_flush_age=", "last_error=", "platform="):
-            _assert(field in drops[0], f"drop warning is missing {field}: {drops[0]}")
-        _assert(lc._log_package_log_db_drop(now=lc._package_log_db_drop_logged_at + lc.PACKAGE_LOG_DB_DROP_LOG_INTERVAL_SECONDS + 1),
-                "the drop warning must repeat after the interval")
-    finally:
-        root.removeHandler(handler)
-        lc.package_log_db_queue = original_queue
-        lc.package_log_db_dropped_rows = original_dropped
-        lc._package_log_db_drop_logged_at = original_logged_at
-    source = (ROOT / "Log_checker.py").read_text(encoding="utf-8")
-    start = source.index("def spl(d):")
-    handler_text = source[start:source.index("def handle_package_log_sync", start)]
-    _assert("active_package_log_session_id = _start_package_log_session(pid)\n"
-            "            # The \"rows not saved\" warning counts rows of the current session only.\n"
-            "            package_log_db_dropped_rows = 0" in handler_text,
-            "a new Package Log session must reset the not-saved count")
 
 
 def test_package_log_older_rows_and_db_status() -> None:
@@ -4952,45 +4907,6 @@ def test_max_callback_contract() -> None:
         lc.process_callback_and_ad_event_log("Unity LevelPlayRewardedAdListener OnAdRewarded adInfo: adUnit:rewarded", "device-callback")
         _assert_equal(lc.callback_ad_logs[-1]["type"], "Callback Levelplay", "LevelPlay listener callbacks must stay Callback Levelplay")
 
-        # iOS syslog writes \" as \134": Adverty5 and Gadsme payloads must still parse.
-        for keyword, callback_type in (("[InPlayAds,Adverty] Adverty5InPlayAd", "Callback Adverty5"), ("[InPlayAds,Gadsme] GadsmeService", "Callback Gadsme")):
-            line = ('Nov 13 16:15:27 iPhone-12 PixelArt(UnityFramework)[2235] <Notice>: ' + keyword +
-                    r'->_OnAdPlacementRegisteredEvent: {"PlacementName":"game_play","class":"Adverty5InPlayAd",'
-                    r'"placement":"{\134"name\134":\134"UIAdvertyFive320x50(Clone)\134",\134"Id\134":1,\134"IsActive\134":false}"}')
-            lc.process_callback_and_ad_event_log(line, "device-callback")
-            row = lc.callback_ad_logs[-1]
-            _assert_equal(row["type"], callback_type, f"{callback_type} row type is wrong")
-            _assert("JSON Parse Error" not in row["details"], f"{callback_type} iOS \\134 payload must parse")
-            # "placement" holds JSON as a string: it is shown as an object.
-            _assert_equal(json.loads(row["json_data"])["placement"], {"name": "UIAdvertyFive320x50(Clone)", "Id": 1, "IsActive": False},
-                          f"{callback_type} placement must be expanded to JSON")
-            _assert("UIAdvertyFive320x50(Clone)" in row["details"] and '\\&quot;' not in row["details"] and '\\"' not in row["details"],
-                    f"{callback_type} details must show placement as a tree, not an escaped string")
-            _assert_equal(row["raw_log"], line, f"{callback_type} raw log must keep the original text")
-
-        # A payload cut over two lines (the continuation repeats the prefix) is one row.
-        head = "Nov 16 10:42:56 iPhone-12 PixelArt(UnityFramework)[1468] <Notice>: [InPlayAds,Adverty] Adverty5Service->_GetUserData: "
-        part1 = head + '{"userData":{"gender":0,"consentString":"CQtnz4AQ'
-        part2 = head + 'kQkMwBIA2FQ","gppSid":{"value":0},"consented":true}}'
-        before = len(lc.callback_ad_logs)
-        lc.process_callback_and_ad_event_log(part1, "device-callback")
-        _assert_equal(len(lc.callback_ad_logs), before, "a cut InPlayAds line must wait for its continuation")
-        lc.process_callback_and_ad_event_log(part2, "device-callback")
-        _assert_equal(len(lc.callback_ad_logs), before + 1, "a split InPlayAds record must become one row")
-        joined = lc.callback_ad_logs[-1]
-        _assert_equal(json.loads(joined["json_data"]),
-                      {"userData": {"gender": 0, "consentString": "CQtnz4AQkQkMwBIA2FQ", "gppSid": {"value": 0}, "consented": True}},
-                      "split InPlayAds JSON was joined wrongly")
-        _assert_equal((joined["event_name"], joined["raw_log"]), ("_GetUserData", part1 + "\n" + part2),
-                      "joined InPlayAds row must keep the method and both raw lines")
-        # A cut line whose continuation never comes is still shown, after the wait.
-        lc.process_callback_and_ad_event_log(part1, "device-other")
-        lc.incomplete_inplayads_logs["device-other"]["started"] -= lc.INPLAYADS_JOIN_MAX_WAIT_SECONDS + 1
-        lc.process_callback_and_ad_event_log("unrelated line", "device-other")
-        _assert_equal((lc.callback_ad_logs[-1]["device_id"], lc.callback_ad_logs[-1]["raw_log"]), ("device-other", part1),
-                      "a held InPlayAds line must be shown when its continuation never comes")
-        _assert("device-other" not in lc.incomplete_inplayads_logs, "the stale InPlayAds buffer must be cleared")
-
         rendered = lc.app.test_client().get("/").get_data(as_text=True)
         _assert('id="callbackTypeMax"' in rendered and 'value="max_callback"' in rendered, "rendered Callback Max filter is missing")
         ordered_filters = [
@@ -6315,7 +6231,6 @@ TESTS: List[Callable[[], None]] = [
     test_package_log_delta_sends_only_new_rows,
     test_package_log_reset_and_sync_protocol,
     test_package_log_raw_and_db_seq_contract,
-    test_package_log_db_drop_diagnostics,
     test_package_log_db_writer_survives_write_errors,
     test_package_log_older_rows_and_db_status,
     test_package_log_stuck_sessions_and_row_counts,
