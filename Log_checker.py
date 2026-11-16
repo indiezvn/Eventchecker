@@ -1419,6 +1419,12 @@ active_ios_package_log_stream_modes = {}
 active_package_log_session_id = None
 package_log_db_queue = Queue(maxsize=PACKAGE_LOG_DB_QUEUE_MAX_ITEMS)
 package_log_db_dropped_rows = 0
+# Writer health, written to app.log when rows start being dropped, so a report
+# shows whether the writer was stuck or rows simply arrived too fast.
+package_log_db_enqueued_rows = 0
+package_log_db_writer_state = {"last_loop": 0.0, "last_flush": 0.0, "last_flush_rows": 0, "last_flush_ms": 0.0, "flushed_rows": 0}
+PACKAGE_LOG_DB_DROP_LOG_INTERVAL_SECONDS = 10.0
+_package_log_db_drop_logged_at = 0.0
 # Last SQLite write error seen by the writer (empty when healthy).
 package_log_db_last_error = ""
 # Only tests set this; the production writer runs for the life of the app.
@@ -1586,6 +1592,11 @@ def _append_callback_ad_row(row):
 
 
 incomplete_impression_logs = {} # Buffer cho logs bị ngắt dòng
+# InPlayAds (Adverty5/Gadsme) lines whose JSON was cut by the log transport;
+# each continuation repeats "[InPlayAds,...] Service->Method: ".  device_id -> state.
+incomplete_inplayads_logs = {}
+INPLAYADS_JOIN_MAX_LINES = 40
+INPLAYADS_JOIN_MAX_WAIT_SECONDS = 3.0
 incomplete_ios_adrevenue_logs = {} # Buffer cho iOS AdRevenue logs bị ngắt dòng
 incomplete_ios_load_ads_ext_logs = {} # Buffer riêng cho Load Ads đọc AppMetrica AdRevenue iOS
 incomplete_ios_max_load_ads_logs = {} # Buffer cho MAX Load Ads viewability logs nhiều dòng
@@ -1934,9 +1945,10 @@ def _enqueue_package_log_db_row(item):
     falls behind; rows already committed to SQLite remain available in the
     history view.
     """
-    global package_log_db_dropped_rows
+    global package_log_db_dropped_rows, package_log_db_enqueued_rows
     try:
         package_log_db_queue.put_nowait(item)
+        package_log_db_enqueued_rows += 1
         return True
     except Full:
         try:
@@ -1944,12 +1956,36 @@ def _enqueue_package_log_db_row(item):
             package_log_db_dropped_rows += 1
         except Empty:
             pass
+        _log_package_log_db_drop()
         try:
             package_log_db_queue.put_nowait(item)
+            package_log_db_enqueued_rows += 1
             return True
         except Full:
             package_log_db_dropped_rows += 1
             return False
+
+
+def _log_package_log_db_drop(now=None):
+    """Write one app.log line about the writer when rows start dropping (throttled)."""
+    global _package_log_db_drop_logged_at
+    now = time.time() if now is None else now
+    if now - _package_log_db_drop_logged_at < PACKAGE_LOG_DB_DROP_LOG_INTERVAL_SECONDS:
+        return False
+    _package_log_db_drop_logged_at = now
+    state = package_log_db_writer_state
+
+    def age(stamp):
+        return f"{now - stamp:.1f}s" if stamp else "never"
+
+    logging.warning(
+        "Package Log DB queue full, dropping rows: dropped=%d queued=%d enqueued=%d flushed=%d "
+        "writer_loop_age=%s last_flush_age=%s last_flush=%d rows in %.1f ms last_error=%s platform=%s",
+        package_log_db_dropped_rows, package_log_db_queue.qsize(), package_log_db_enqueued_rows,
+        state["flushed_rows"], age(state["last_loop"]), age(state["last_flush"]),
+        state["last_flush_rows"], state["last_flush_ms"], package_log_db_last_error or "-", active_platform,
+    )
+    return True
 
 
 def _drain_package_log_db_queue():
@@ -1981,6 +2017,7 @@ def _package_log_db_writer():
         nonlocal conn, batch, last_flush
         if not batch:
             return
+        started = time.perf_counter()
         if conn is None:
             conn = _get_package_db_connection()
         conn.executemany(
@@ -1999,12 +2036,19 @@ def _package_log_db_writer():
             [(count, session_id) for session_id, count in per_session.items()],
         )
         conn.commit()
-        batch = []
         last_flush = time.time()
+        package_log_db_writer_state.update(
+            last_flush=last_flush,
+            last_flush_rows=len(batch),
+            last_flush_ms=(time.perf_counter() - started) * 1000,
+            flushed_rows=package_log_db_writer_state["flushed_rows"] + len(batch),
+        )
+        batch = []
 
     while not package_log_db_writer_stop.is_set() or batch:
         if package_log_db_writer_stop.is_set() and conn is None and package_log_db_last_error:
             break
+        package_log_db_writer_state["last_loop"] = time.time()
         try:
             item = package_log_db_queue.get(timeout=0.5)
             batch.append(item)
@@ -3725,6 +3769,24 @@ def _parse_callback_json_payload(json_str):
                     pass
     return data
 
+def _expand_json_string_values(value, depth=0):
+    """Parse string values that hold JSON (e.g. Adverty "placement") so they show as a tree."""
+    if depth > 8:
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if (text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]")):
+            try:
+                return _expand_json_string_values(json.loads(text), depth + 1)
+            except ValueError:
+                pass
+        return value
+    if isinstance(value, list):
+        return [_expand_json_string_values(item, depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_json_string_values(item, depth + 1) for key, item in value.items()}
+    return value
+
 def _find_first_key_deep(data, keys):
     if isinstance(data, dict):
         for key, value in data.items():
@@ -4701,7 +4763,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(94)</title>
+    <title>Event Inspector v2.5.0(95)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4902,7 +4964,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(94)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(95)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -14055,6 +14117,124 @@ def _flush_ios_event_log_buffer(device_id):
     if parsed and parsed[0]:
         _dispatch_event_record(buffered, device_id, parsed)
 
+def _json_object_is_open(text):
+    """True when the first JSON object in text starts but never closes (a cut log)."""
+    text = _decode_ios_levelplay_json_text(text)
+    start = text.find("{")
+    if start < 0:
+        return False
+    depth, in_string, escaped = 0, False, False
+    for ch in text[start:]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return False
+    return True
+
+
+def _split_inplayads_line(log_entry, keyword, default_name):
+    """Return (method, prefix, payload) for "[InPlayAds,...] Service->Method: payload"."""
+    after_keyword = log_entry.split(keyword, 1)[1]
+    if "->" in after_keyword:
+        method = after_keyword.split("->", 1)[1].split(":", 1)[0].strip()
+    else:
+        method = after_keyword.split(":", 1)[0].strip() or default_name
+    arrow = after_keyword.find("->")
+    colon = after_keyword.find(":", arrow + 2 if arrow >= 0 else 0)
+    if colon < 0:
+        return method, after_keyword.strip(), ""
+    return method, after_keyword[:colon + 1].strip(), after_keyword[colon + 1:].strip()
+
+
+def _emit_inplayads_row(device_id, callback_type, method, payload, raw_log):
+    json_str = extract_json_object_from_text(payload)
+    details = "N/A"
+    json_data_for_log = "{}"
+    if json_str:
+        # iOS syslog writes \" as \134"; the shared parser decodes it.
+        data = _parse_callback_json_payload(json_str)
+        if data is not None:
+            data = _expand_json_string_values(data)
+            details = format_json_html(data)
+            json_data_for_log = json.dumps(data, ensure_ascii=False)
+        else:
+            details = f'<div class="text-xs font-mono break-all text-red-600">JSON Parse Error</div><div class="text-xs font-mono break-all">{html.escape(json_str)}</div>'
+    _append_callback_ad_row({
+        "device_id": device_id,
+        "device_name": get_device_name(device_id),
+        "type": callback_type,
+        "event_name": method,
+        "details": details,
+        "raw_log": raw_log,
+        "json_data": json_data_for_log,
+    })
+
+
+def _flush_inplayads_pending(pending):
+    _emit_inplayads_row(pending["device_id"], pending["callback_type"], pending["method"],
+                        pending["payload"], "\n".join(pending["raw_lines"]))
+
+
+def _flush_stale_inplayads_log(device_id):
+    """Emit a held split line whose continuation never came."""
+    with lock:
+        pending = incomplete_inplayads_logs.get(device_id)
+        if not pending or time.time() - pending["started"] < INPLAYADS_JOIN_MAX_WAIT_SECONDS:
+            return
+        incomplete_inplayads_logs.pop(device_id, None)
+    _flush_inplayads_pending(pending)
+
+
+def _process_inplayads_callback_line(log_entry, device_id, keyword, callback_type, default_name):
+    """One Callback row per InPlayAds record; a JSON cut over several lines is joined first.
+
+    Each continuation repeats the "[InPlayAds,...] Service->Method:" prefix, which
+    is dropped before joining.  Every source line stays in the row's raw log.
+    """
+    method, prefix, payload = _split_inplayads_line(log_entry, keyword, default_name)
+    raw_line = log_entry.strip()
+    flush = None
+    with lock:
+        pending = incomplete_inplayads_logs.get(device_id)
+        if pending and pending["keyword"] == keyword and pending["prefix"] == prefix:
+            pending["payload"] += payload
+            pending["raw_lines"].append(raw_line)
+            if _json_object_is_open(pending["payload"]) and len(pending["raw_lines"]) < INPLAYADS_JOIN_MAX_LINES:
+                return
+            incomplete_inplayads_logs.pop(device_id, None)
+            flush, pending = pending, None
+        elif pending:
+            # Another record started: keep the cut one as it is.
+            incomplete_inplayads_logs.pop(device_id, None)
+        if flush is None and payload.startswith("{") and _json_object_is_open(payload):
+            incomplete_inplayads_logs[device_id] = {
+                "device_id": device_id, "keyword": keyword, "prefix": prefix,
+                "callback_type": callback_type, "method": method, "payload": payload,
+                "raw_lines": [raw_line], "started": time.time(),
+            }
+            new_record_held = True
+        else:
+            new_record_held = False
+    if flush is not None:
+        _flush_inplayads_pending(flush)
+        return
+    if pending:
+        _flush_inplayads_pending(pending)
+    if not new_record_held:
+        _emit_inplayads_row(device_id, callback_type, method, payload, raw_line)
+
+
 def process_callback_and_ad_event_log(log_entry, device_id, event_name=None, actual_params=None, json_string=None):
     global incomplete_impression_logs
     if is_paused: return
@@ -14135,68 +14315,16 @@ def process_callback_and_ad_event_log(log_entry, device_id, event_name=None, act
         )
         return
 
-    # --- 0e. Process Gadsme callbacks ---
-    if GADSME_SERVICE_KEYWORD in log_entry:
-        try:
-            after_keyword = log_entry.split(GADSME_SERVICE_KEYWORD, 1)[1]
-            if "->" in after_keyword:
-                method_part = after_keyword.split("->", 1)[1].split(":", 1)[0].strip()
-            else:
-                method_part = after_keyword.split(":", 1)[0].strip() or "Gadsme"
-            json_str = extract_json_object_from_text(after_keyword)
-            details = "N/A"
-            json_data_for_log = "{}"
-            if json_str:
-                try:
-                    data = json.loads(json_str)
-                    details = format_json_html(data)
-                    json_data_for_log = json_str
-                except:
-                    details = f'<div class="text-xs font-mono break-all text-red-600">JSON Parse Error</div><div class="text-xs font-mono break-all">{json_str}</div>'
-            _append_callback_ad_row({
-                "device_id": device_id,
-                "device_name": get_device_name(device_id),
-                "type": "Callback Gadsme",
-                "event_name": method_part or "Gadsme",
-                "details": details,
-                "raw_log": log_entry.strip(),
-                "json_data": json_data_for_log
-            })
+    # --- 0e. Process Gadsme / Adverty callbacks (split lines joined) ---
+    _flush_stale_inplayads_log(device_id)
+    for keyword, callback_type, default_name in (
+        (GADSME_SERVICE_KEYWORD, "Callback Gadsme", "Gadsme"),
+        (ADVERTY5_KEYWORD, "Callback Adverty5", "Adverty"),
+    ):
+        if keyword in log_entry:
+            _process_inplayads_callback_line(log_entry, device_id, keyword, callback_type, default_name)
             return
-        except:
-            pass
 
-    # --- 0b. Process Adverty callbacks ---
-    if ADVERTY5_KEYWORD in log_entry:
-        try:
-            after_keyword = log_entry.split(ADVERTY5_KEYWORD, 1)[1]
-            if "->" in after_keyword:
-                method_part = after_keyword.split("->", 1)[1].split(":", 1)[0].strip()
-            else:
-                method_part = after_keyword.split(":", 1)[0].strip() or "Adverty"
-            json_str = extract_json_object_from_text(after_keyword)
-            details = "N/A"
-            json_data_for_log = "{}"
-            if json_str:
-                try:
-                    data = json.loads(json_str)
-                    details = format_json_html(data)
-                    json_data_for_log = json_str
-                except:
-                    details = f'<div class="text-xs font-mono break-all text-red-600">JSON Parse Error</div><div class="text-xs font-mono break-all">{json_str}</div>'
-            _append_callback_ad_row({
-                "device_id": device_id,
-                "device_name": get_device_name(device_id),
-                "type": "Callback Adverty5",
-                "event_name": method_part or "Adverty",
-                "details": details,
-                "raw_log": log_entry.strip(),
-                "json_data": json_data_for_log
-            })
-            return
-        except:
-            pass
-    
     # --- 1. HANDLING BUFFERED IMPRESSION DATA (Split Logs) ---
     # Check if we are currently buffering for this device
     with lock:
@@ -16344,7 +16472,7 @@ def _reset_runtime_for_platform_switch():
         specific_event_params_filters = []
         specific_event_results.clear(); specific_event_pending.clear(); event_log_cache.clear()
         adrevenue_logs.clear(); adrevenue_rendered.clear(); adrevenue_pending.clear(); _clear_live_table_pending(); adrevenue_log_cache.clear()
-        callback_ad_logs.clear(); incomplete_impression_logs.clear(); incomplete_ios_adrevenue_logs.clear(); incomplete_ios_load_ads_ext_logs.clear(); incomplete_ios_max_load_ads_logs.clear(); incomplete_ios_event_logs.clear(); incomplete_android_event_logs.clear(); incomplete_adjust_adrevenue_logs.clear()
+        callback_ad_logs.clear(); incomplete_impression_logs.clear(); incomplete_inplayads_logs.clear(); incomplete_ios_adrevenue_logs.clear(); incomplete_ios_load_ads_ext_logs.clear(); incomplete_ios_max_load_ads_logs.clear(); incomplete_ios_event_logs.clear(); incomplete_android_event_logs.clear(); incomplete_adjust_adrevenue_logs.clear()
         price_rotation_logs.clear()
         package_log_cache.clear(); active_package_pids.clear(); active_ios_package_log_buffers.clear(); active_ios_package_log_frame_buffers.clear(); active_ios_package_log_stream_modes.clear()
         installation_id_state.clear()
@@ -16474,6 +16602,7 @@ def cl():
         sdk_max_ios_pending_lines = {}
         sdk_max_ios_core_pending_lines = {}
         incomplete_impression_logs.clear()
+        incomplete_inplayads_logs.clear()
         incomplete_ios_adrevenue_logs.clear()
         incomplete_ios_load_ads_ext_logs.clear()
         incomplete_ios_max_load_ads_logs.clear()
@@ -16635,6 +16764,7 @@ def stop_sdk_check():
 @socketio.on('start_package_log')
 def spl(d):
     global target_package_name, active_package_log_session_id
+    global package_log_db_dropped_rows, _package_log_db_drop_logged_at
     pid = str((d or {}).get('package_id', '') or '').strip()
     for device_id in list(active_ios_package_log_frame_buffers):
         _flush_ios_package_log_frame_buffer(device_id)
@@ -16650,6 +16780,9 @@ def spl(d):
         target_package_name = pid
         if pid:
             active_package_log_session_id = _start_package_log_session(pid)
+            # The "rows not saved" warning counts rows of the current session only.
+            package_log_db_dropped_rows = 0
+            _package_log_db_drop_logged_at = 0.0
         package_log_cache.clear()
         active_ios_package_log_buffers.clear()
         active_ios_package_log_frame_buffers.clear()
