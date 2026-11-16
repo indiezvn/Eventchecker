@@ -4763,7 +4763,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(96)</title>
+    <title>Event Inspector v2.5.0(97)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4964,7 +4964,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(96)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(97)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -10942,18 +10942,6 @@ DEFAULT_PACKAGE_QUICK_FILTERS = {
 _PACKAGE_QUICK_FILTER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 
-def _default_export_dir(fallback_dir):
-    """Exports open the save dialog in the user's Downloads folder.
-
-    Falls back to the app's own exports folder when Downloads does not exist.
-    """
-    downloads = os.path.join(os.path.expanduser("~"), "Downloads")
-    if os.path.isdir(downloads):
-        return downloads
-    os.makedirs(fallback_dir, exist_ok=True)
-    return fallback_dir
-
-
 def _quick_filter_platform(value):
     return "ios" if value == "ios" else "android"
 
@@ -11134,7 +11122,8 @@ def package_quick_filters_export_api():
         # so the browser can ask where to put it.
         return jsonify({"ok": True, "filename": filename, "count": len(filters),
                         "content": json.dumps(document, ensure_ascii=False, indent=2)})
-    export_dir = _default_export_dir(os.path.join(_user_data_dir(), "exports"))
+    export_dir = os.path.join(_user_data_dir(), "exports")
+    os.makedirs(export_dir, exist_ok=True)
     path = os.path.join(export_dir, filename)
     try:
         if webview and getattr(webview, "windows", None):
@@ -12760,22 +12749,6 @@ def clear_update_cache():
         return jsonify({'ok': False, 'error': str(e)})
 
 
-# Waits (up to 30 s) for the old app process ($1) to exit, then opens the bundle ($2).
-MACOS_RELAUNCH_SCRIPT = (
-    'i=0; while kill -0 "$1" 2>/dev/null && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done; '
-    'exec /usr/bin/open -a "$2"'
-)
-
-
-def _macos_app_bundle(executable):
-    """The .app bundle that holds a frozen macOS executable, or "" elsewhere."""
-    marker = ".app/Contents/MacOS/"
-    executable = str(executable or "")
-    if sys.platform != "darwin" or marker not in executable:
-        return ""
-    return executable.split(marker, 1)[0] + ".app"
-
-
 @app.post('/restart_app')
 def restart_app():
     cmd = os.getenv('EVENTINSPECTOR_RESTART_CMD')
@@ -12792,20 +12765,7 @@ def restart_app():
     if args:
         argv.append(args)
     try:
-        bundle = _macos_app_bundle(cmd)
-        if bundle:
-            # A GUI app started straight from this dying process opens a window
-            # that never takes clicks on macOS.  Let LaunchServices start the
-            # bundle once this process is gone, like a normal double-click.
-            subprocess.Popen(
-                ["/bin/sh", "-c", MACOS_RELAUNCH_SCRIPT, "eventinspector-relaunch", str(os.getpid()), bundle],
-                start_new_session=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            subprocess.Popen(argv, creationflags=creation_flags)
+        subprocess.Popen(argv, creationflags=creation_flags)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)})
     os._exit(0)
@@ -13250,7 +13210,8 @@ def package_log_export_api():
         sql += " ORDER BY id ASC"
         rows = conn.execute(sql, params).fetchall()
 
-        export_dir = _default_export_dir(os.path.join(_package_history_dir(), "exports"))
+        export_dir = os.path.join(_package_history_dir(), "exports")
+        os.makedirs(export_dir, exist_ok=True)
         started_at = session["started_at"] or time.time()
         started_label = time.strftime("%Y%m%d_%H%M%S", time.localtime(started_at))
         package_stub = re.sub(r'[^A-Za-z0-9._-]+', '_', session["package_id"] or f"session_{session_id}")
