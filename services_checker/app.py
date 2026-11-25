@@ -415,24 +415,8 @@ ANDROID_NAMESPACE_URI = 'http://schemas.android.com/apk/res/android'
 TARGET_METADATA_KEYS_MAP = {
     "com.facebook.sdk.ApplicationId": "Facebook ID",
     "com.facebook.sdk.ClientToken": "Facebook Client Token",
-    "io.appmetrica.analytics.plugin_id": "Appmetrica Unity version",
-    # Google Play Billing Library writes its version here (e.g. 9.0.0).
-    "com.google.android.play.billingclient.version": "Google Billing",
+    "io.appmetrica.analytics.plugin_id": "Appmetrica Unity version"
 }
-
-# Manifest meta-data shown in "Google Services & Meta-INF" next to the
-# archive files, so presets can check them by the same name.
-GOOGLE_SERVICES_MANIFEST_METADATA = ("Google Billing",)
-
-
-def scan_manifest_for_google_services(apk_path):
-    """Versions that live in AndroidManifest.xml meta-data (e.g. Google Billing)."""
-    try:
-        _permissions, metadata, _attributes, _error = extract_manifest_data(apk_path)
-    except Exception as exc:
-        logger.warning(f"Manifest meta-data scan failed for {apk_path}: {exc}")
-        return {}
-    return {name: metadata[name] for name in GOOGLE_SERVICES_MANIFEST_METADATA if metadata.get(name)}
 
 # --- External library mappings ---
 # The user-facing Gradle and Podfile mappings live in JSON files so adding or
@@ -894,7 +878,7 @@ HTML_TEMPLATE = """
                     </div>
                     <div class="mb-4">
                         <label for="apk_expected_versions" class="block text-sm font-medium text-gray-700 mb-1">Input Expected Library Versions (Optional):</label>
-                        <textarea id="apk_expected_versions" name="expected_versions" class="textarea" rows="3" placeholder="AndroidX RecyclerView      1.3.2&#10;Google Play App Update    2.1.0&#10;UMP SDK version           2.1.0&#10;Google Billing            9.0.0&#10;... (Library Name <tabs/spaces> Version)"></textarea>
+                        <textarea id="apk_expected_versions" name="expected_versions" class="textarea" rows="3" placeholder="AndroidX RecyclerView      1.3.2&#10;Google Play App Update    2.1.0&#10;UMP SDK version           2.1.0&#10;... (Library Name <tabs/spaces> Version)"></textarea>
                     </div>
                     <div class="mb-4">
                         <a id="download-binary-manifest" href="#" class="button button-secondary mr-2 text-sm py-2 px-3 hidden" download="AndroidManifest_binary.xml">Download Binary Manifest</a>
@@ -2566,7 +2550,6 @@ def upload_apk_for_scan():
             found_file_versions = scan_archive_for_files(apk_savelocation, TARGET_APK_FILE_PATHS)
             if 'error' in found_file_versions: # If scan_archive_for_files returned an error object
                 return jsonify({'success': False, 'error': found_file_versions['error']})
-            found_file_versions.update(scan_manifest_for_google_services(apk_savelocation))
 
         except Exception as e:
             logger.error(f"Error during APK processing after save {apk_savelocation}: {e}")
