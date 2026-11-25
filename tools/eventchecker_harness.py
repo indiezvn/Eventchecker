@@ -51,7 +51,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 96
+RELEASE_SOURCE_BUILD = 97
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -3394,7 +3394,7 @@ def test_sdk_check_preset_contract() -> None:
     c193_android = presets["C-193-Android"]
     c193_android_lines = c193_android.get("lines") or []
     _assert_equal(c193_android.get("platform"), "android", "C-193 Android preset platform changed")
-    _assert_equal(len(c193_android_lines), 54, "C-193 Android preset line count changed")
+    _assert_equal(len(c193_android_lines), 53, "C-193 Android preset line count changed")
     for required_line in (
         "AppLovin\t5.9.0\t13.6.4",
         "Chartboost\t5.10.0\t9.14.1",
@@ -5227,6 +5227,34 @@ def test_update_candidate_does_not_downgrade() -> None:
     )
 
 
+def test_services_checker_google_billing_from_manifest() -> None:
+    """Google Services & Meta-INF shows the Google Billing version from AndroidManifest meta-data."""
+    service_path = ROOT / "services_checker" / "app.py"
+    spec = importlib.util.spec_from_file_location("eventinspector_services_checker_billing", service_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        _assert_equal(module.TARGET_METADATA_KEYS_MAP.get("com.google.android.play.billingclient.version"), "Google Billing",
+                      "the Play Billing meta-data key must map to Google Billing")
+        found = {"metadata": {"Google Billing": "9.0.0", "Facebook ID": "123"}}
+        module.extract_manifest_data = lambda apk_path: ([], dict(found["metadata"]), {}, None)
+        _assert_equal(module.scan_manifest_for_google_services("x.apk"), {"Google Billing": "9.0.0"},
+                      "only Google Services manifest values belong in the APK scan")
+        found["metadata"] = {}
+        _assert_equal(module.scan_manifest_for_google_services("x.apk"), {}, "an APK without Billing must not add a row")
+
+        def broken(apk_path):
+            raise RuntimeError("bad manifest")
+        module.extract_manifest_data = broken
+        _assert_equal(module.scan_manifest_for_google_services("x.apk"), {}, "a manifest error must not break the file scan")
+        source = service_path.read_text(encoding="utf-8")
+        _assert("found_file_versions.update(scan_manifest_for_google_services(apk_savelocation))" in source,
+                "the APK scan must add the manifest Google Services versions")
+    finally:
+        sys.modules.pop(spec.name, None)
+
+
 def test_services_checker_gradle_mapping_contract() -> None:
     service_source = (ROOT / "services_checker" / "app.py").read_text(encoding="utf-8")
     gradle_mapping = json.loads((ROOT / "services_checker" / "gradle_lib_mapping.json").read_text(encoding="utf-8"))
@@ -6455,6 +6483,7 @@ TESTS: List[Callable[[], None]] = [
     test_macos_architecture_contract,
     test_update_candidate_does_not_downgrade,
     test_services_checker_gradle_mapping_contract,
+    test_services_checker_google_billing_from_manifest,
     test_services_checker_live_preset_refresh_after_restart,
     test_services_checker_git_value_reload_from_real_commit,
     test_sdk_preset_git_value_reload_from_real_commit,
