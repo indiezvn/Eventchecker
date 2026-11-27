@@ -2499,38 +2499,23 @@ def _normalize_ios_udid(value):
         return cleaned.lower()
     return str(value).strip()
 
-def _tidevice_row_is_usb(line):
-    """The ConnType column (last) of a `tidevice list` row is USB.
-
-    Python 3.12+ prints it as "ConnectionType.USB"; Python 3.11 and older print
-    the value, "usb".  Network-paired rows ("...NETWORK" / "network") never match.
-    """
-    parts = str(line or "").split()
-    return bool(parts) and parts[-1].casefold() in ("connectiontype.usb", "usb")
-
-
 def _list_ios_device_ids():
     ids = []
     tidevice = _resolve_ios_tool("tidevice")
     if tidevice:
         try:
-            # UTF-8 both ways: on Windows a device name such as "iPhone của Trúc"
-            # otherwise breaks tidevice's own print or our decode, and the list comes back empty.
             output = subprocess.run(
                 [tidevice, "list"],
                 capture_output=True,
                 text=True,
-                encoding="utf-8",
-                errors="replace",
-                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
                 timeout=8,
                 creationflags=creation_flags,
-            ).stdout or ""
+            ).stdout
             for line in output.splitlines():
                 match = re.search(r'\b([0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}|[0-9A-Fa-f]{24}|[0-9A-Fa-f]{40})\b', line)
                 if not match:
                     continue
-                if _tidevice_row_is_usb(line):
+                if "ConnectionType.USB" in line:
                     ids.append(_normalize_ios_udid(match.group(1)))
         except Exception:
             pass
@@ -4778,7 +4763,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(98)</title>
+    <title>Event Inspector v2.5.0(99)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4979,7 +4964,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(98)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(99)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
