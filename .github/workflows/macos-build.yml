@@ -93,7 +93,7 @@ jobs:
 
           short_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Contents/Info.plist")"
           build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Contents/Info.plist")"
-          test "$short_version" = "2.5.0"
+          test "$short_version" = "2.6.0"
           test "$build_number" = "${{ steps.release.outputs.build_number }}"
 
           binary_info="$(file "$app_path/Contents/MacOS/EventInspector")"

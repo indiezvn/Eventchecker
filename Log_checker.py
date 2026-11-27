@@ -1,3 +1,13 @@
+# --- App version ---
+# Users see "v2.6.0 (1)": the build number starts again at 1 for each version.
+# Installed apps pick an update by one ever-growing number that the launcher
+# reads from the first 200 kB of this file (the vX.Y.Z(N) marker below), so
+# that number is MAJOR*100000 + MINOR*1000 + BUILD and must never go down.
+# The marker must stay the only vX.Y.Z(N) text in this file.
+APP_VERSION = "2.6.0"
+APP_BUILD = 1
+APP_UPDATE_MARKER = "v2.6.0(206001)"
+
 import json
 import re
 import subprocess
@@ -648,6 +658,7 @@ def _record_app_open_audit_once():
             "os_name": platform.system(),
             "os_version": platform.platform(),
             "app_build": _current_app_build(),
+            "app_version": f"{APP_VERSION} ({APP_BUILD})",
         }
         if not webhook_url:
             logging.info("App-open audit payload prepared locally without webhook: %s", json.dumps(payload, ensure_ascii=False))
@@ -4778,7 +4789,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(99)</title>
+    <title>Event Inspector v2.6.0 (1)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4979,7 +4990,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(99)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.6.0 (1)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5669,7 +5680,7 @@ HTML_TEMPLATE = """
                             <input type="text" id="packageIdInput" class="w-full p-2 text-[11px] border rounded-md shadow-sm" placeholder="com.example.app">
                             <div class="flex justify-center items-center gap-2 mt-3">
                                 <button id="startPackageLogBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs py-2 px-4 rounded-lg h-9">Start</button>
-                                <button id="startPackageLogIosFullBtn" type="button" class="hidden whitespace-nowrap bg-violet-600 hover:bg-violet-700 text-white font-semibold text-xs py-2 px-4 rounded-lg h-9" title="iOS 26+: Start, then reopen the game (Development build) so its logs show values instead of &lt;private&gt;. Every tab sees the full logs while this run of the game lasts.">Start (iOS 26+)</button>
+                                <button id="startPackageLogIosFullBtn" type="button" class="hidden whitespace-nowrap bg-violet-600 hover:bg-violet-700 text-white font-semibold text-xs py-2 px-4 rounded-lg h-9" title="iOS 26+: Start, then reopen the game (Development build) so its logs show values instead of &lt;private&gt; and Firebase DebugView is on. Every tab sees the full logs while this run of the game lasts.">Start (iOS 26+)</button>
                                 <button id="openPackageHistoryBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-slate-600 hover:bg-slate-700 text-white h-9">Recorded Log</button>
                             </div>
                         </div>
@@ -12014,6 +12025,9 @@ def _perf_ios_python():
 # logs them in full, and the normal syslog reader then sees everything.
 # TestFlight / App Store builds stay redacted whatever is done.
 IOS_FULL_LOG_ENV = "OS_ACTIVITY_DT_MODE=YES"
+# Launch argument: turns on Firebase Analytics DebugView for the device (no
+# special build needed; Firebase keeps it on until -FIRDebugDisabled).
+IOS_FULL_LOG_APP_ARGS = ("-FIRDebugEnabled",)
 IOS_FULL_LOG_TIMEOUT_SECONDS = 90
 
 
@@ -12056,7 +12070,8 @@ def _ios_launch_with_full_logs(device_id, search):
         return {"ok": False, "error": "not_development_build", "bundle_id": bundle_id,
                 "signer": info.get("SignerIdentity") or ""}
     launched = _pymobiledevice3_run(["developer", "dvt", "launch", "--udid", device_id, "--userspace",
-                                     "--env", IOS_FULL_LOG_ENV, bundle_id], IOS_FULL_LOG_TIMEOUT_SECONDS)
+                                     "--env", IOS_FULL_LOG_ENV, " ".join((bundle_id,) + IOS_FULL_LOG_APP_ARGS)],
+                                    IOS_FULL_LOG_TIMEOUT_SECONDS)
     output = (launched.stdout or "") + (launched.stderr or "")
     pid = re.search(r"pid\s+(\d+)", output)
     if launched.returncode != 0 or not pid:

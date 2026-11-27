@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$BundleRoot,
     [string]$SourcePath = "Log_checker.py",
-    [string]$ExpectedSeries = "2.5.0"
+    [string]$ExpectedSeries = "2.6.0"
 )
 
 $ErrorActionPreference = "Stop"
