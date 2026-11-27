@@ -45,11 +45,11 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-11-27-3-2.5.0-99"
+CURRENT_RELEASE_VERSION = "2026-11-27-5-2.6.0-206001"
 # Series and update code of the published manifest payload.  The update code
 # is what installed apps compare (vSERIES(CODE) marker, manifest version tail).
-CURRENT_RELEASE_SERIES = "2.5.0"
-CURRENT_RELEASE_BUILD = 99
+CURRENT_RELEASE_SERIES = "2.6.0"
+CURRENT_RELEASE_BUILD = 206001
 ROLLBACK_SOURCE_BUILD = 56
 # Version of the source being prepared.  It runs ahead of the published
 # payload until the release gate regenerates the manifest from the committed
