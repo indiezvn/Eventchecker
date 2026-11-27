@@ -45,8 +45,8 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-11-27-3-2.5.0-99"
-CURRENT_RELEASE_BUILD = 99
+CURRENT_RELEASE_VERSION = "2026-11-27-6-2.5.0-206002"
+CURRENT_RELEASE_BUILD = 206002
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
