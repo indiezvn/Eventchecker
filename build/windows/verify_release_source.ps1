@@ -1,6 +1,6 @@
 param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$ExpectedSeries = "2.6.0",
+    [string]$ExpectedSeries = "2.5.0",
     [string]$GithubEnvPath = "",
     [string]$GithubOutputPath = "",
     [switch]$PrintVersion
@@ -31,11 +31,7 @@ if (-not $match.Success) {
     throw "Wrong release source: expected v$ExpectedSeries(build), found $marker"
 }
 
-# The marker holds the update code MAJOR*100000 + MINOR*1000 + BUILD; Windows
-# file versions allow at most 65535 per part, so the installer gets the BUILD.
-$updateCode = [int]$match.Groups['build'].Value
-$displayBuild = if ($updateCode -ge 100000) { $updateCode % 1000 } else { $updateCode }
-$releaseVersion = "$ExpectedSeries.$displayBuild"
+$releaseVersion = "$ExpectedSeries.$($match.Groups['build'].Value)"
 $markerLine = "EVENTINSPECTOR_RELEASE_MARKER=$marker"
 $versionLine = "EVENTINSPECTOR_RELEASE_VERSION=$releaseVersion"
 

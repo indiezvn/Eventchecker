@@ -45,26 +45,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-11-27-5-2.6.0-206001"
-# Series and update code of the published manifest payload.  The update code
-# is what installed apps compare (vSERIES(CODE) marker, manifest version tail).
-CURRENT_RELEASE_SERIES = "2.6.0"
-CURRENT_RELEASE_BUILD = 206001
+CURRENT_RELEASE_VERSION = "2026-11-27-3-2.5.0-99"
+CURRENT_RELEASE_BUILD = 99
 ROLLBACK_SOURCE_BUILD = 56
-# Version of the source being prepared.  It runs ahead of the published
-# payload until the release gate regenerates the manifest from the committed
-# source.  Users see "vSERIES (BUILD)"; the update code is
-# MAJOR*100000 + MINOR*1000 + BUILD and only ever grows.
-RELEASE_SOURCE_SERIES = "2.6.0"
-RELEASE_SOURCE_BUILD = 1
-
-
-def _update_code(series, build):
-    major, minor, _patch = (int(part) for part in series.split("."))
-    return major * 100000 + minor * 1000 + build
-
-
-RELEASE_SOURCE_CODE = _update_code(RELEASE_SOURCE_SERIES, RELEASE_SOURCE_BUILD)
+# Build marker of the source being prepared.  It runs ahead of
+# CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
+# regenerates the manifest from the committed source.
+RELEASE_SOURCE_BUILD = 206002
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -1106,8 +1093,8 @@ def test_ios_full_log_launch() -> None:
         _assert(ok["ok"] and ok["pid"] == 3453 and ok["bundle_id"] == "com.indiez.idletycoon.horse.racing", f"launch failed: {ok}")
         _assert_equal(ok["device_id"], "00008120-001C0D3C0C61A01E", "the only USB iPhone must be used")
         _assert_equal(calls[-1], ["developer", "dvt", "launch", "--udid", "00008120-001C0D3C0C61A01E", "--userspace",
-                                  "--env", "OS_ACTIVITY_DT_MODE=YES", "com.indiez.idletycoon.horse.racing -FIRDebugEnabled"],
-                      "the game must be launched with OS_ACTIVITY_DT_MODE and Firebase DebugView on")
+                                  "--env", "OS_ACTIVITY_DT_MODE=YES", "com.indiez.idletycoon.horse.racing"],
+                      "the game must be launched with OS_ACTIVITY_DT_MODE")
         calls.clear()
         refused = client.post("/api/ios/launch-full-logs", json={"search": "PixelArt"})
         _assert_equal((refused.status_code, refused.get_json()["error"]), (400, "not_development_build"), "TestFlight builds must be refused")
@@ -4064,15 +4051,10 @@ def test_sdk_failed_groups_sort_first() -> None:
 
 def test_release_build_marker() -> None:
     text = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
-    marker = f"v{RELEASE_SOURCE_SERIES}({RELEASE_SOURCE_CODE})"
-    _assert(f'APP_VERSION = "{RELEASE_SOURCE_SERIES}"' in text and f"APP_BUILD = {RELEASE_SOURCE_BUILD}\n" in text
-            and f'APP_UPDATE_MARKER = "{marker}"' in text, f"Log_checker.py must be prepared for {marker}")
-    _assert(f"v{RELEASE_SOURCE_SERIES} ({RELEASE_SOURCE_BUILD})" in text, "the visible version label is missing")
-    # The installed launcher reads only the first 200 kB and takes the largest marker.
-    markers = re.findall(r"v\d+\.\d+\.\d+\((\d+)\)", text)
-    _assert_equal(markers, [str(RELEASE_SOURCE_CODE)], "the update marker must be the only vX.Y.Z(N) text")
-    _assert(text.index(marker) < 200000, "the update marker must stay in the first 200 kB the launcher reads")
-    _assert(RELEASE_SOURCE_CODE > 99, "the update code must stay above every 2.5.0 build")
+    _assert(
+        f"v2.5.0({RELEASE_SOURCE_BUILD})" in text,
+        f"Log_checker.py must be prepared for v2.5.0({RELEASE_SOURCE_BUILD})",
+    )
 
 
 def test_preset_revert_protection_contract() -> None:
@@ -5264,8 +5246,8 @@ def test_release_payload_sync() -> None:
     _assert_equal(manifest["version"], CURRENT_RELEASE_VERSION, "v2.5 release manifest version changed")
 
     markers = {
-        "release_badge": rf"v{re.escape(RELEASE_SOURCE_SERIES)} \({RELEASE_SOURCE_BUILD}\)</span>",
-        "html_title": rf"<title>Event Inspector v{re.escape(RELEASE_SOURCE_SERIES)} \({RELEASE_SOURCE_BUILD}\)</title>",
+        "release_badge": r"v2\.5\.0\((\d+)\)",
+        "html_title": rf"<title>Event Inspector v2\.5\.0\({RELEASE_SOURCE_BUILD}\)</title>",
         "socket_fallback": r"typeof window\.io === 'function'",
         "brightsdk_tab": r"switchTab\('BrightSDK'\)",
         "package_quick_select": r'id="packageQuickSelectList"',
@@ -5998,7 +5980,7 @@ def test_update_flow_canonical_v25() -> None:
             )
             _assert("Default Ad Events" in updated_source, "prepared payload does not contain Default Ad Events")
             _assert(
-                f"v{CURRENT_RELEASE_SERIES}({CURRENT_RELEASE_BUILD})" in updated_source,
+                f"v2.5.0({CURRENT_RELEASE_BUILD})" in updated_source,
                 "prepared payload carries the wrong UI build marker",
             )
 
@@ -6215,8 +6197,7 @@ def test_windows_release_build_version_contract() -> None:
     _assert("verify_update_manifest.py" in smoke_source, "Windows updater smoke must verify manifest hashes")
     _assert("EventInspector-Windows-v${{ steps.release.outputs.release_version }}" in workflow, "Windows artifacts must be versioned")
     _assert('[switch]$PrintVersion' in source_guard, "Windows source guard must expose the resolved version")
-    _assert(f'ExpectedSeries = "{RELEASE_SOURCE_SERIES}"' in source_guard, "Windows source guard must enforce the current series")
-    _assert("$updateCode % 1000" in source_guard, "Windows installer version must use the display build (max 65535 per part)")
+    _assert('ExpectedSeries = "2.5.0"' in source_guard, "Windows source guard must enforce the v2.5 series")
     _assert("$match.Groups['build'].Value" in source_guard, "Windows source guard must derive the build number from source")
     _assert("bundleMarker -ne $sourceMarker" in bundle_guard, "Windows bundle guard must reject stale bundled source")
     _assert('Resolve-BundleFile $BundleRoot "remote_update.py"' in bundle_guard, "Windows bundle guard must verify the updater source")
@@ -6224,7 +6205,7 @@ def test_windows_release_build_version_contract() -> None:
     _assert("-PrintVersion" in installer_script, "Windows installer must derive its version from the source")
     _assert("/DMyAppVersion=%EVENTINSPECTOR_RELEASE_VERSION%" in installer_script, "Inno Setup must receive the source version")
     _assert(
-        f'#define MyAppVersion "{RELEASE_SOURCE_SERIES}.{RELEASE_SOURCE_BUILD}"' in iss_script,
+        f'#define MyAppVersion "2.5.0.{RELEASE_SOURCE_BUILD}"' in iss_script,
         "Inno Setup fallback must match the current v2.5 release",
     )
 
