@@ -4778,7 +4778,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,"> <!-- Fix lỗi Favicon 404 -->
-    <title>Event Inspector v2.5.0(98)</title>
+    <title>Event Inspector v2.5.0(99)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
     <style>
@@ -4979,7 +4979,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex items-center gap-2.5">
                             <h1 class="text-xl font-bold text-gray-700">Event Inspector</h1>
-                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(98)</span>
+                            <span class="text-xs font-semibold bg-indigo-100 text-indigo-700 px-2 py-1 rounded-full">v2.5.0(99)</span>
                         </div>
                         <p class="text-sm text-gray-500">Integrates Load Ads & Event Validation.</p>
                     </div>
@@ -5669,6 +5669,7 @@ HTML_TEMPLATE = """
                             <input type="text" id="packageIdInput" class="w-full p-2 text-[11px] border rounded-md shadow-sm" placeholder="com.example.app">
                             <div class="flex justify-center items-center gap-2 mt-3">
                                 <button id="startPackageLogBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs py-2 px-4 rounded-lg h-9">Start</button>
+                                <button id="startPackageLogIosFullBtn" type="button" class="hidden whitespace-nowrap bg-violet-600 hover:bg-violet-700 text-white font-semibold text-xs py-2 px-4 rounded-lg h-9" title="iOS 26+: Start, then reopen the game (Development build) so its logs show values instead of &lt;private&gt;. Every tab sees the full logs while this run of the game lasts.">Start (iOS 26+)</button>
                                 <button id="openPackageHistoryBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-slate-600 hover:bg-slate-700 text-white h-9">Recorded Log</button>
                             </div>
                         </div>
@@ -5816,6 +5817,7 @@ HTML_TEMPLATE = """
                         <button id="pausePackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-amber-500 hover:bg-amber-600 text-white">Pause</button>
                         <button id="stopPackageLogBtn" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-red-500 hover:bg-red-600 text-white">Stop</button>
                         <button id="clearPackageViewBtn" type="button" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200" title="Clear the rows on screen only. Recording keeps running and Recorded Logs still have every row.">Clear log</button>
+                        <button id="iosFullLogLaunchBtn" type="button" class="hidden text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-indigo-600 hover:bg-indigo-700 text-white" title="Development build only: reopen the game on the USB iPhone so its logs show values instead of &lt;private&gt;">Mở game (xem đủ log)</button>
                         <button id="searchPackageSessionBtn" type="button" class="text-sm font-semibold py-2 px-3 rounded-lg transition-colors shadow-sm bg-slate-600 hover:bg-slate-700 text-white" title="Search every row of this session in saved history (Filter 1-3, Tag and quick filters)">Tìm toàn session</button>
                     </div>
                     <div class="w-44">
@@ -6423,6 +6425,7 @@ HTML_TEMPLATE = """
 
         function syncPlatformUi() {
             const platform = activePlatform === 'ios' ? 'ios' : 'android';
+            document.getElementById('startPackageLogIosFullBtn')?.classList.toggle('hidden', platform !== 'ios');
             document.querySelectorAll('.sdk-check-panel').forEach(panel => {
                 panel.classList.toggle('hidden', panel.getAttribute('data-sdk-platform') !== platform);
             });
@@ -6536,6 +6539,7 @@ HTML_TEMPLATE = """
             activePlatform = platform === 'ios' ? 'ios' : 'android';
             if (persist) localStorage.setItem('eventInspectorPlatform', activePlatform);
             if (platformBtn) platformBtn.textContent = `Platform: ${platformLabel(activePlatform)}`;
+            document.getElementById('startPackageLogIosFullBtn')?.classList.toggle('hidden', activePlatform !== 'ios');
             resetBrightSdkUiState();
             resetRuntimeUiForPlatformSwitch();
             socket.emit('set_platform', { platform: activePlatform, reset: !!persist });
@@ -9779,7 +9783,50 @@ HTML_TEMPLATE = """
 
         function openPackageStreamModal() {
             packageStreamModal?.classList.remove('hidden');
+            document.getElementById('iosFullLogLaunchBtn')?.classList.toggle('hidden', activePlatform !== 'ios');
         }
+
+        // iOS: reopen a Development build so its logs are not <private>.
+        const IOS_FULL_LOG_ERRORS = {
+            ios_tool_missing: 'Chưa có pymobiledevice3 (cài như ở tab Performance).',
+            no_ios_device: 'Chưa có iPhone cắm USB.',
+            choose_device: 'Đang cắm nhiều iPhone: chọn máy ở Filter by Device trước.',
+            device_not_connected: 'Máy đang chọn không còn kết nối USB.',
+            search_required: 'Chưa có Bundle Search của game.',
+            app_not_found: 'Không tìm thấy game này trên iPhone.',
+            app_ambiguous: 'Có nhiều app khớp tên này, gõ Bundle Search cụ thể hơn.',
+            not_development_build: 'Game này không phải bản Development (TestFlight/App Store luôn bị che <private>).',
+            launch_failed: 'Không mở được game (cần bật Developer Mode trên iPhone).',
+            timeout: 'Mở game quá lâu, thử lại.',
+        };
+        function launchIosFullLogs(btn) {
+            if (!btn || btn.disabled) return;
+            const label = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Đang mở game...';
+            fetch('/api/ios/launch-full-logs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    search: packageStreamTarget || '',
+                    device_id: (typeof selectedDevice !== 'undefined' && selectedDevice !== 'all') ? selectedDevice : '',
+                }),
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) {
+                        btn.textContent = `Đã mở ${data.name || data.bundle_id} (xem đủ log)`;
+                        setTimeout(() => { btn.textContent = label; }, 4000);
+                        return;
+                    }
+                    btn.textContent = label;
+                    const message = IOS_FULL_LOG_ERRORS[data.error] || `Không mở được game: ${data.error || 'unknown'}`;
+                    alert(data.detail ? `${message}\n\n${data.detail}` : message);
+                })
+                .catch(err => { btn.textContent = label; alert(`Không mở được game: ${err}`); })
+                .finally(() => { btn.disabled = false; });
+        }
+        document.getElementById('iosFullLogLaunchBtn')?.addEventListener('click', (event) => launchIosFullLogs(event.currentTarget));
 
         function closePackageStreamModal() {
             packageStreamModal?.classList.add('hidden');
@@ -9884,7 +9931,7 @@ HTML_TEMPLATE = """
             renderPackageLogTable(true);
         }
 
-        startPackageLogBtn?.addEventListener('click', () => {
+        function startPackageLogFromInput() {
              const packageInput = document.getElementById('packageIdInput');
              const pkg = String(packageInput?.value || '').trim();
              if (!pkg) {
@@ -9892,7 +9939,7 @@ HTML_TEMPLATE = """
                      ? 'Chọn hoặc nhập Bundle Search trước khi start Package Log.'
                      : 'Chọn hoặc nhập Package ID trước khi start Package Log.');
                  packageInput?.focus();
-                 return;
+                 return '';
              }
              setPackagePauseState(false);
              packageStreamTarget = pkg;
@@ -9900,6 +9947,14 @@ HTML_TEMPLATE = """
              openPackageStreamModal();
              socket.emit('start_package_log', {package_id: pkg});
              setPackageRunningState(true);
+             return pkg;
+        }
+        startPackageLogBtn?.addEventListener('click', () => { startPackageLogFromInput(); });
+        // iOS 26+: start capturing first, then reopen the game so it logs from its
+        // first line without <private> (status shows on the button in the Stream window).
+        document.getElementById('startPackageLogIosFullBtn')?.addEventListener('click', () => {
+            if (activePlatform !== 'ios') return;
+            if (startPackageLogFromInput()) launchIosFullLogs(document.getElementById('iosFullLogLaunchBtn'));
         });
 
         pausePackageLogBtn?.addEventListener('click', () => {
@@ -11951,6 +12006,87 @@ def _perf_ios_tool_status(refresh=False, wait=True):
 def _perf_ios_python():
     status = _perf_ios_tool_status()
     return status["python"] if status and status.get("installed") else ""
+
+
+# --- iOS: open a Development build so its logs are not redacted ---
+# iOS replaces dynamic log values with <private>.  A Development build
+# (get-task-allow) launched by the developer tools with OS_ACTIVITY_DT_MODE
+# logs them in full, and the normal syslog reader then sees everything.
+# TestFlight / App Store builds stay redacted whatever is done.
+IOS_FULL_LOG_ENV = "OS_ACTIVITY_DT_MODE=YES"
+IOS_FULL_LOG_TIMEOUT_SECONDS = 90
+
+
+def _pymobiledevice3_run(args, timeout):
+    python = _perf_ios_python()
+    if not python:
+        raise RuntimeError("ios_tool_missing")
+    return subprocess.run([python, "-m", "pymobiledevice3", *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout, creationflags=creation_flags)
+
+
+def _ios_find_app(apps, search):
+    """The installed app for a Package Log search text (executable, name, or bundle id)."""
+    wanted = str(search or "").strip().casefold()
+    if not wanted:
+        return None, None
+    exact, partial = [], []
+    for bundle_id, info in (apps or {}).items():
+        names = [bundle_id, info.get("CFBundleExecutable"), info.get("CFBundleName"), info.get("CFBundleDisplayName")]
+        names = [str(n).casefold() for n in names if n]
+        if wanted in names:
+            exact.append((bundle_id, info))
+        elif any(wanted in n for n in names):
+            partial.append((bundle_id, info))
+    matches = exact or partial
+    return matches[0] if len(matches) == 1 else (None, [m[0] for m in matches])
+
+
+def _ios_launch_with_full_logs(device_id, search):
+    listed = _pymobiledevice3_run(["apps", "list", "--udid", device_id, "-t", "User"], 60)
+    try:
+        apps = json.loads(listed.stdout or "{}")
+    except ValueError:
+        return {"ok": False, "error": "apps_list_failed", "detail": (listed.stderr or "")[-300:]}
+    bundle_id, info = _ios_find_app(apps, search)
+    if not bundle_id:
+        return {"ok": False, "error": "app_ambiguous" if info else "app_not_found", "candidates": info or []}
+    entitlements = info.get("Entitlements") or {}
+    if entitlements.get("get-task-allow") is not True:
+        return {"ok": False, "error": "not_development_build", "bundle_id": bundle_id,
+                "signer": info.get("SignerIdentity") or ""}
+    launched = _pymobiledevice3_run(["developer", "dvt", "launch", "--udid", device_id, "--userspace",
+                                     "--env", IOS_FULL_LOG_ENV, bundle_id], IOS_FULL_LOG_TIMEOUT_SECONDS)
+    output = (launched.stdout or "") + (launched.stderr or "")
+    pid = re.search(r"pid\s+(\d+)", output)
+    if launched.returncode != 0 or not pid:
+        return {"ok": False, "error": "launch_failed", "bundle_id": bundle_id, "detail": output[-400:]}
+    return {"ok": True, "bundle_id": bundle_id, "pid": int(pid.group(1)),
+            "name": info.get("CFBundleDisplayName") or info.get("CFBundleName") or bundle_id}
+
+
+@app.post('/api/ios/launch-full-logs')
+def ios_launch_full_logs_api():
+    payload = request.get_json(silent=True) or {}
+    search = str(payload.get("search") or target_package_name or "").strip()
+    ios_ids = [d.get("id") for d in connected_devices_info if d.get("platform") == "ios" and d.get("id")]
+    device_id = str(payload.get("device_id") or "").strip()
+    if device_id and device_id not in ios_ids:
+        return jsonify({"ok": False, "error": "device_not_connected"}), 400
+    if not device_id:
+        if len(ios_ids) != 1:
+            return jsonify({"ok": False, "error": "choose_device" if ios_ids else "no_ios_device"}), 400
+        device_id = ios_ids[0]
+    if not search:
+        return jsonify({"ok": False, "error": "search_required"}), 400
+    try:
+        result = _ios_launch_with_full_logs(device_id, search)
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "timeout"}), 504
+    result["device_id"] = device_id
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 
 @app.get('/api/perf/ios-tool')
