@@ -51,7 +51,7 @@ ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 97
+RELEASE_SOURCE_BUILD = 98
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -718,6 +718,9 @@ def test_max_sdk_logs() -> None:
                 continue
             version = expected["adapter"]
             _assert(version, f"MAX adapter preset is empty: {display_name}")
+            if not re.search(r"\d", version):
+                # e.g. "Skip": the preset only checks that the adapter is present.
+                continue
             metadata_line = (
                 "[HealthEventsReporter] Reporting signal_collection_success with extra parameters "
                 f"collection [{{adapter_version={version}, network_name={observed_name}, "
@@ -1072,10 +1075,21 @@ eb6b13cc453f5a53ef07ff7149858a8635d18c10  F17VXQA8JCLH    iPhone X     iPhone X 
 00008030-0009398422F3C02E  V149104TF2      iPad gen 9   iPad (9th generation)  18.5  ConnectionType.USB
 eb6b13cc453f5a53ef07ff7149858a8635d18c10  F17VXQA8JCLH    iPhone X     iPhone X               16.7.12  ConnectionType.NETWORK
 """,
+        # tidevice under Python 3.11 or older prints the ConnType value; names can be Vietnamese.
+        """UDID                       SerialNumber    NAME              MarketName    ProductVersion    ConnType
+00008101-001405582801401E  F2LDX1Q0P5      iPhone của Trúc   iPhone 12     18.1              usb
+eb6b13cc453f5a53ef07ff7149858a8635d18c10  F17VXQA8JCLH    iPhone X     iPhone X               16.7.12  network
+""",
     ]
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(stdout=outputs.pop(0))
+
     try:
         lc._resolve_ios_tool = lambda name: "/fake/tidevice" if name == "tidevice" else None
-        lc.subprocess.run = lambda *args, **kwargs: types.SimpleNamespace(stdout=outputs.pop(0))
+        lc.subprocess.run = fake_run
 
         network_ids = lc._list_ios_device_ids()
         _assert_equal(
@@ -1089,6 +1103,13 @@ eb6b13cc453f5a53ef07ff7149858a8635d18c10  F17VXQA8JCLH    iPhone X     iPhone X 
             ["00008030-0009398422F3C02E"],
             "USB discovery must ignore network-paired rows",
         )
+        _assert_equal(
+            lc._list_ios_device_ids(),
+            ["00008101-001405582801401E"],
+            "a plain 'usb' ConnType (tidevice on Python 3.11 or older) must be discovered",
+        )
+        _assert(all(call.get("encoding") == "utf-8" and call.get("env", {}).get("PYTHONIOENCODING") == "utf-8" for call in calls),
+                "tidevice list must run and be read as UTF-8 (Windows device names)")
         source = (ROOT / "Log_checker.py").read_text(encoding="utf-8", errors="ignore")
         _assert(
             "selected_ids = ids or network_ids" not in source,
@@ -3394,7 +3415,7 @@ def test_sdk_check_preset_contract() -> None:
     c193_android = presets["C-193-Android"]
     c193_android_lines = c193_android.get("lines") or []
     _assert_equal(c193_android.get("platform"), "android", "C-193 Android preset platform changed")
-    _assert_equal(len(c193_android_lines), 53, "C-193 Android preset line count changed")
+    _assert_equal(len(c193_android_lines), 54, "C-193 Android preset line count changed")
     for required_line in (
         "AppLovin\t5.9.0\t13.6.4",
         "Chartboost\t5.10.0\t9.14.1",
