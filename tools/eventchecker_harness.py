@@ -45,13 +45,13 @@ from openpyxl import Workbook
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE_VERSION = "2026-11-27-3-2.5.0-99"
-CURRENT_RELEASE_BUILD = 99
+CURRENT_RELEASE_VERSION = "2026-11-27-1-2.5.0-98"
+CURRENT_RELEASE_BUILD = 98
 ROLLBACK_SOURCE_BUILD = 56
 # Build marker of the source being prepared.  It runs ahead of
 # CURRENT_RELEASE_BUILD (the published manifest payload) until the release gate
 # regenerates the manifest from the committed source.
-RELEASE_SOURCE_BUILD = 99
+RELEASE_SOURCE_BUILD = 100
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -1060,72 +1060,6 @@ def test_ios_reader_singleton_contract() -> None:
         "active_ios_log_readers.get(device_id) is thread" in source,
         "iOS reader shutdown must not remove a replacement reader",
     )
-
-
-def test_ios_full_log_launch() -> None:
-    """Package Log iOS: reopen a Development build with OS_ACTIVITY_DT_MODE so its logs are not <private>."""
-    apps = {
-        "com.indiez.idletycoon.horse.racing": {"CFBundleExecutable": "HorseRacing", "CFBundleDisplayName": "Horse Racing",
-                                               "Entitlements": {"get-task-allow": True}},
-        "com.indiez.nonogram": {"CFBundleExecutable": "PixelArt", "CFBundleDisplayName": "Pixel Art",
-                                "Entitlements": {"get-task-allow": False}, "SignerIdentity": "TestFlight Beta Distribution"},
-        "com.indiez.solitaire.word.card.puzzle": {"CFBundleExecutable": "WordSolitaire", "Entitlements": {"get-task-allow": True}},
-    }
-    calls = []
-
-    def fake_run(args, timeout):
-        calls.append(list(args))
-        if args[:2] == ["apps", "list"]:
-            return types.SimpleNamespace(stdout=json.dumps(apps), stderr="", returncode=0)
-        return types.SimpleNamespace(stdout="Process launched with pid 3453\n", stderr="", returncode=0)
-
-    original = (lc._pymobiledevice3_run, list(lc.connected_devices_info), lc.target_package_name)
-    try:
-        lc._pymobiledevice3_run = fake_run
-        _assert_equal(lc._ios_find_app(apps, "horseracing")[0], "com.indiez.idletycoon.horse.racing", "executable name must find the app")
-        _assert_equal(lc._ios_find_app(apps, "Pixel Art")[0], "com.indiez.nonogram", "display name must find the app")
-        _assert_equal(lc._ios_find_app(apps, "com.indiez")[0], None, "an ambiguous search must not pick an app")
-        _assert_equal(lc._ios_find_app(apps, "Unknown"), (None, []), "an unknown search finds nothing")
-
-        lc.connected_devices_info[:] = [{"id": "00008120-001C0D3C0C61A01E", "platform": "ios"}]
-        client = lc.app.test_client()
-        ok = client.post("/api/ios/launch-full-logs", json={"search": "HorseRacing"}).get_json()
-        _assert(ok["ok"] and ok["pid"] == 3453 and ok["bundle_id"] == "com.indiez.idletycoon.horse.racing", f"launch failed: {ok}")
-        _assert_equal(ok["device_id"], "00008120-001C0D3C0C61A01E", "the only USB iPhone must be used")
-        _assert_equal(calls[-1], ["developer", "dvt", "launch", "--udid", "00008120-001C0D3C0C61A01E", "--userspace",
-                                  "--env", "OS_ACTIVITY_DT_MODE=YES", "com.indiez.idletycoon.horse.racing"],
-                      "the game must be launched with OS_ACTIVITY_DT_MODE")
-        calls.clear()
-        refused = client.post("/api/ios/launch-full-logs", json={"search": "PixelArt"})
-        _assert_equal((refused.status_code, refused.get_json()["error"]), (400, "not_development_build"), "TestFlight builds must be refused")
-        _assert(not any(c[:2] == ["developer", "dvt"] for c in calls), "a refused build must not be launched")
-        _assert_equal(client.post("/api/ios/launch-full-logs", json={"search": "HorseRacing", "device_id": "other"}).get_json()["error"],
-                      "device_not_connected", "only a connected USB iPhone may be used")
-        lc.connected_devices_info[:] = [{"id": "a", "platform": "ios"}, {"id": "b", "platform": "ios"}]
-        _assert_equal(client.post("/api/ios/launch-full-logs", json={"search": "HorseRacing"}).get_json()["error"],
-                      "choose_device", "two iPhones need a chosen device")
-        lc.connected_devices_info[:] = []
-        _assert_equal(client.post("/api/ios/launch-full-logs", json={"search": "HorseRacing"}).get_json()["error"],
-                      "no_ios_device", "no USB iPhone must be reported")
-        html = client.get("/").get_data(as_text=True)
-        _assert('id="iosFullLogLaunchBtn"' in html and "fetch('/api/ios/launch-full-logs'" in html,
-                "Package Log must have the iOS full-log button")
-        _assert("classList.toggle('hidden', activePlatform !== 'ios')" in html, "the full-log button is for iOS only")
-        # "Start (iOS 26+)" next to Start: starts the capture, then reopens the game.
-        _assert('id="startPackageLogIosFullBtn"' in html and ">Start (iOS 26+)</button>" in html, "Start (iOS 26+) button is missing")
-        _assert(html.index('id="startPackageLogBtn"') < html.index('id="startPackageLogIosFullBtn"') < html.index('id="openPackageHistoryBtn"'),
-                "Start (iOS 26+) must sit right after Start")
-        _assert("document.getElementById('startPackageLogIosFullBtn')?.classList.toggle('hidden', activePlatform !== 'ios');" in html,
-                "Start (iOS 26+) must show on iOS only")
-        sync = html[html.index("function syncPlatformUi() {"):]
-        _assert("document.getElementById('startPackageLogIosFullBtn')?.classList.toggle('hidden', platform !== 'ios');" in sync[:600],
-                "a platform change from the server must also show/hide Start (iOS 26+)")
-        _assert("if (startPackageLogFromInput()) launchIosFullLogs(document.getElementById('iosFullLogLaunchBtn'));" in html,
-                "Start (iOS 26+) must start the capture before reopening the game")
-    finally:
-        lc._pymobiledevice3_run = original[0]
-        lc.connected_devices_info[:] = original[1]
-        lc.target_package_name = original[2]
 
 
 def test_ios_transport_fallback_contract() -> None:
@@ -6487,7 +6421,6 @@ TESTS: List[Callable[[], None]] = [
     test_platform_switch_drops_stale_device_status_contract,
     test_ios_reader_singleton_contract,
     test_ios_transport_fallback_contract,
-    test_ios_full_log_launch,
     test_ios_discovery_grace_contract,
     test_ios_reader_liveness_contract,
     test_android_logcat_reconnect_cursor_contract,
